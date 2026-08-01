@@ -1,0 +1,128 @@
+"""
+SQLite storage for API keys and credit balances. Deliberately simple (raw
+sqlite3, no ORM) for a v1 -- this is a single-process service with a single
+writer, WAL mode makes concurrent reads safe alongside it.
+"""
+import hashlib
+import secrets
+import sqlite3
+import time
+from contextlib import contextmanager
+
+DB_PATH = "observe_api.db"
+
+
+def hash_key(raw_key: str) -> str:
+    # Store only the hash, never the raw key -- same practice as
+    # GitHub/Stripe API tokens. A leaked DB doesn't leak usable keys.
+    return hashlib.sha256(raw_key.encode()).hexdigest()
+
+
+_hash_key = hash_key  # internal alias, kept for the calls below
+
+
+@contextmanager
+def get_conn():
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def init_db():
+    with get_conn() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS api_keys (
+                key_hash TEXT PRIMARY KEY,
+                email TEXT NOT NULL,
+                credits INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                last_used_at REAL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS usage_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_hash TEXT NOT NULL,
+                query TEXT NOT NULL,
+                repo_filter TEXT,
+                result_count INTEGER,
+                created_at REAL NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS credit_purchases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_hash TEXT NOT NULL,
+                stripe_session_id TEXT UNIQUE NOT NULL,
+                credits_added INTEGER NOT NULL,
+                amount_cents INTEGER NOT NULL,
+                created_at REAL NOT NULL
+            )
+        """)
+
+
+def create_api_key(email: str) -> str:
+    """Creates a new key, returns the RAW key (only ever returned once --
+    caller must save it, we only ever store the hash from here on)."""
+    raw_key = "obs_" + secrets.token_urlsafe(32)
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO api_keys (key_hash, email, credits, created_at) VALUES (?, ?, 0, ?)",
+            (_hash_key(raw_key), email, time.time()),
+        )
+    return raw_key
+
+
+def get_key_record(raw_key: str):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM api_keys WHERE key_hash = ?", (_hash_key(raw_key),)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def deduct_credit(raw_key: str, amount: int = 1) -> bool:
+    """Atomically deducts `amount` credits if the balance covers it.
+    Returns False (no deduction happens) if balance is insufficient --
+    the UPDATE's WHERE clause makes this check-and-deduct atomic under
+    SQLite's own transaction, no separate read-then-write race."""
+    key_hash = _hash_key(raw_key)
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE api_keys SET credits = credits - ?, last_used_at = ? "
+            "WHERE key_hash = ? AND credits >= ?",
+            (amount, time.time(), key_hash, amount),
+        )
+        return cur.rowcount > 0
+
+
+def add_credits(key_hash: str, credits: int, stripe_session_id: str, amount_cents: int):
+    """Credits EXACTLY the one API key named by key_hash -- the checkout
+    session's metadata carries this hash (set at signup time, see
+    server.py), so a purchase is never ambiguous even if two accounts
+    share an email address."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE api_keys SET credits = credits + ? WHERE key_hash = ?",
+            (credits, key_hash),
+        )
+        if cur.rowcount == 0:
+            raise ValueError(f"add_credits: no api_key row for key_hash {key_hash!r} -- refusing to log an orphaned purchase")
+        conn.execute(
+            "INSERT INTO credit_purchases (key_hash, stripe_session_id, credits_added, amount_cents, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (key_hash, stripe_session_id, credits, amount_cents, time.time()),
+        )
+
+
+def log_usage(raw_key: str, query: str, repo_filter: str | None, result_count: int):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO usage_log (key_hash, query, repo_filter, result_count, created_at) VALUES (?, ?, ?, ?, ?)",
+            (_hash_key(raw_key), query, repo_filter, result_count, time.time()),
+        )
