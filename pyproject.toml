@@ -1,0 +1,26 @@
+[project]
+name = "observe-search-tools"
+version = "0.1.0"
+description = "Client tools for the hosted OBSERVE Search API -- pay-per-query semantic code search over curated open source repos, for AI agents. MCP server + LangChain + CrewAI tool wrappers."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.0"]
+langchain = ["langchain-core>=0.2", "pydantic>=2"]
+crewai = ["crewai>=0.30", "pydantic>=2"]
+all = ["mcp>=1.0", "langchain-core>=0.2", "crewai>=0.30", "pydantic>=2"]
+
+[project.scripts]
+observe-search-mcp = "observe_search_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["observe_search_mcp*", "observe_search_tools*"]

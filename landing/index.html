@@ -1,0 +1,474 @@
+<title>OBSERVE — semantic code search, priced for machines</title>
+<meta name="description" content="Pay-per-query semantic code search over curated open source repositories. Priced under the tokens it saves. Built for agents." />
+
+<style>
+  :root {
+    --paper: #F1EFE7;
+    --paper-raised: #E8E4D8;
+    --ink: #1C1E1A;
+    --ink-soft: #4A4A42;
+    --muted: #8B8577;
+    --line: #D8D3C4;
+    --accent: #3E7269;
+    --accent-ink: #F1EFE7;
+    --good: #3E7269;
+    --bad: #A0522D;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #15181A;
+      --paper-raised: #1D2123;
+      --ink: #E8E6DE;
+      --ink-soft: #B8B4A6;
+      --muted: #7A7668;
+      --line: #2C3032;
+      --accent: #6FAB9E;
+      --accent-ink: #10201C;
+      --good: #6FAB9E;
+      --bad: #C97B54;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #15181A;
+    --paper-raised: #1D2123;
+    --ink: #E8E6DE;
+    --ink-soft: #B8B4A6;
+    --muted: #7A7668;
+    --line: #2C3032;
+    --accent: #6FAB9E;
+    --accent-ink: #10201C;
+    --good: #6FAB9E;
+    --bad: #C97B54;
+  }
+  :root[data-theme="light"] {
+    --paper: #F1EFE7;
+    --paper-raised: #E8E4D8;
+    --ink: #1C1E1A;
+    --ink-soft: #4A4A42;
+    --muted: #8B8577;
+    --line: #D8D3C4;
+    --accent: #3E7269;
+    --accent-ink: #F1EFE7;
+    --good: #3E7269;
+    --bad: #A0522D;
+  }
+
+  * { box-sizing: border-box; }
+  html { background: var(--paper); }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Optima, Candara, "Noto Sans", "Segoe UI", sans-serif;
+    font-size: 17px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .display {
+    font-family: "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif;
+    text-wrap: balance;
+  }
+  .mono {
+    font-family: ui-monospace, "SF Mono", Consolas, "Roboto Mono", Menlo, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  a { color: var(--accent); }
+  a:focus-visible, button:focus-visible, input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .wrap {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 0 28px;
+  }
+
+  /* ---------- Hero ---------- */
+  header.hero {
+    padding: 88px 0 64px;
+    border-bottom: 1px solid var(--line);
+  }
+  .eyebrow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 28px;
+  }
+  .trit-glyph {
+    display: inline-flex;
+    gap: 3px;
+  }
+  .trit-glyph span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--line);
+  }
+  .trit-glyph span.on { background: var(--accent); }
+
+  h1.display {
+    font-size: clamp(2.4rem, 5vw, 3.6rem);
+    font-weight: 400;
+    line-height: 1.08;
+    margin: 0 0 22px;
+    letter-spacing: -0.01em;
+  }
+  h1.display em {
+    font-style: italic;
+    color: var(--accent);
+  }
+  .lede {
+    max-width: 60ch;
+    font-size: 1.15rem;
+    color: var(--ink-soft);
+    margin: 0 0 36px;
+  }
+  .hero-actions {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  .btn {
+    display: inline-block;
+    padding: 12px 22px;
+    border-radius: 3px;
+    text-decoration: none;
+    font-size: 0.95rem;
+    border: 1px solid var(--ink);
+    transition: transform 0.15s ease, opacity 0.15s ease;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .btn { transition: none; }
+  }
+  .btn-solid {
+    background: var(--ink);
+    color: var(--paper);
+  }
+  .btn-solid:hover { transform: translateY(-1px); }
+  .btn-line {
+    color: var(--ink);
+    border-color: var(--line);
+  }
+  .btn-line:hover { border-color: var(--ink); }
+
+  /* ---------- Sections ---------- */
+  section {
+    padding: 56px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .kicker {
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 12px;
+    color: var(--muted);
+    margin: 0 0 14px;
+  }
+  h2.display {
+    font-size: 1.7rem;
+    font-weight: 400;
+    margin: 0 0 18px;
+  }
+  p { max-width: 68ch; }
+  p.body-copy { color: var(--ink-soft); }
+
+  /* ---------- Positioning card ---------- */
+  .positioning {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    margin-top: 28px;
+  }
+  .positioning > div {
+    background: var(--paper);
+    padding: 24px 26px;
+  }
+  .positioning .label {
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+  .positioning .verdict-good { color: var(--good); }
+  .positioning .verdict-bad { color: var(--bad); }
+  .positioning code {
+    font-size: 0.85rem;
+  }
+  @media (max-width: 640px) {
+    .positioning { grid-template-columns: 1fr; }
+  }
+
+  /* ---------- Data sheet ---------- */
+  table.datasheet {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 24px;
+    font-size: 0.95rem;
+  }
+  table.datasheet th {
+    text-align: left;
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    font-weight: 400;
+    padding: 0 12px 10px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  table.datasheet td {
+    padding: 12px 12px 12px 0;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  table.datasheet tr:last-child td { border-bottom: none; }
+  .stat { font-size: 1.05rem; }
+  .stat-sub { color: var(--muted); font-size: 0.85rem; }
+  .overflow-x { overflow-x: auto; }
+
+  /* ---------- Repo catalog ---------- */
+  .catalog {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    margin-top: 24px;
+  }
+  .catalog span {
+    background: var(--paper);
+    padding: 14px 16px;
+    font-size: 0.92rem;
+  }
+  .catalog span::before {
+    content: "·";
+    color: var(--accent);
+    margin-right: 8px;
+  }
+
+  /* ---------- Pricing ---------- */
+  .price-block {
+    display: flex;
+    gap: 36px;
+    align-items: baseline;
+    flex-wrap: wrap;
+    margin: 28px 0 22px;
+  }
+  .price-figure {
+    font-size: 2.4rem;
+    color: var(--accent);
+  }
+  .price-figure .unit {
+    font-size: 1rem;
+    color: var(--muted);
+  }
+  .price-vs {
+    border-left: 1px solid var(--line);
+    padding-left: 28px;
+  }
+  .price-vs .stat-sub { display: block; margin-bottom: 4px; }
+
+  /* ---------- Terminal ---------- */
+  .terminal {
+    background: var(--paper-raised);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 22px 24px;
+    margin-top: 24px;
+    overflow-x: auto;
+  }
+  .terminal .line { white-space: pre; font-size: 0.88rem; }
+  .terminal .comment { color: var(--muted); }
+  .terminal .prompt { color: var(--accent); }
+
+  .integrations {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 20px;
+  }
+  .pill {
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 6px 14px;
+    font-size: 0.82rem;
+    color: var(--ink-soft);
+  }
+
+  /* ---------- Footer ---------- */
+  footer {
+    padding: 56px 0 88px;
+  }
+  footer .wrap {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    gap: 24px;
+  }
+  footer .foot-note {
+    color: var(--muted);
+    font-size: 0.85rem;
+    max-width: 46ch;
+  }
+</style>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="eyebrow">
+      <span class="trit-glyph"><span class="on"></span><span></span><span class="on"></span></span>
+      OBSERVE Search API
+    </div>
+    <h1 class="display">Semantic code search,<br /><em>priced for machines.</em></h1>
+    <p class="lede">
+      Pay-per-query search over a curated set of real open source repositories —
+      React, Django, NumPy, Tokio, and a dozen more. An API key, a prepaid
+      balance, and a single endpoint. No approval queue between "buy credits"
+      and "start querying."
+    </p>
+    <div class="hero-actions">
+      <a class="btn btn-solid" href="#pricing">See pricing</a>
+      <a class="btn btn-line" href="#integrate">Read the API</a>
+    </div>
+  </div>
+</header>
+
+<section id="positioning">
+  <div class="wrap">
+    <p class="kicker">When to reach for this</p>
+    <h2 class="display">Grep still wins when you know the name.</h2>
+    <p class="body-copy">
+      This exists for the other case: when a caller can only <em>describe</em>
+      what it's looking for. "Where does this handle retrying a failed
+      upload" is a search problem, not a lookup — the underlying engine
+      finds it by meaning, not by string match.
+    </p>
+    <div class="positioning">
+      <div>
+        <div class="label">You know the identifier</div>
+        <div class="verdict-bad mono" style="font-size:0.95rem; margin-bottom:8px;">grep wins — 5/5 vs. 3/5</div>
+        <p class="body-copy" style="margin:0; font-size:0.92rem;">Exact-name queries. One call, free, faster than an embedding round trip.</p>
+      </div>
+      <div>
+        <div class="label">You can only describe it</div>
+        <div class="verdict-good mono" style="font-size:0.95rem; margin-bottom:8px;">this API wins — 66% fewer tokens</div>
+        <p class="body-copy" style="margin:0; font-size:0.92rem;">Vocabulary mismatch, legacy renames, concept-only queries. One call instead of several exploratory greps.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="benchmarks">
+  <div class="wrap">
+    <p class="kicker">Measured, not asserted</p>
+    <h2 class="display">Every number below is from a reproducible benchmark.</h2>
+    <p class="body-copy">Including the ones that aren't flattering — see the positioning note above.</p>
+    <div class="overflow-x">
+      <table class="datasheet">
+        <thead>
+          <tr><th>Metric</th><th>Result</th><th>Basis</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Accuracy, real OSS code</td>
+            <td class="mono stat">92% <span class="stat-sub">vs. 76.7% stock baseline</span></td>
+            <td class="stat-sub">Fine-tuned retrieval model vs. off-the-shelf embeddings</td>
+          </tr>
+          <tr>
+            <td>Accuracy, hard benchmark</td>
+            <td class="mono stat">96% <span class="stat-sub">vs. 92% stock baseline</span></td>
+            <td class="stat-sub">Curated adversarial query set</td>
+          </tr>
+          <tr>
+            <td>Token cost vs. plain search</td>
+            <td class="mono stat">−66.3%</td>
+            <td class="stat-sub">Same query set, deduplicated + relevance-cut results</td>
+          </tr>
+          <tr>
+            <td>Index footprint</td>
+            <td class="mono stat">19.9× smaller</td>
+            <td class="stat-sub">Ternary bit-packing — 5 trits per byte — vs. float32</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section id="repos">
+  <div class="wrap">
+    <p class="kicker">Currently indexed</p>
+    <h2 class="display">Fifteen repositories, refreshed from their default branch.</h2>
+    <p class="body-copy">Call <span class="mono">GET /v1/repos</span> for the live list — this catalog grows independently of this page.</p>
+    <div class="catalog">
+      <span>react</span><span>django</span><span>flask</span><span>fastapi</span>
+      <span>express</span><span>redis</span><span>numpy</span><span>pandas</span>
+      <span>svelte</span><span>vue</span><span>axios</span><span>gin</span>
+      <span>cargo</span><span>tokio</span><span>laravel</span>
+    </div>
+  </div>
+</section>
+
+<section id="pricing">
+  <div class="wrap">
+    <p class="kicker">Pricing</p>
+    <h2 class="display">Priced under what a search saves, not around what it costs to run.</h2>
+    <div class="price-block">
+      <div class="price-figure mono">$5 <span class="unit">/ 50,000 credits</span></div>
+      <div class="price-vs">
+        <span class="stat-sub">≈ $0.0001 per search</span>
+        <span class="stat-sub">1 credit deducted per call, refunded automatically on a failed search</span>
+      </div>
+    </div>
+    <p class="body-copy">
+      A search's own marginal compute cost is close to zero — one embedding
+      and a matrix multiply against a model that's already warm in memory.
+      The real constraint isn't infrastructure, it's whether querying beats
+      the token cost of not querying. At typical model API pricing, a few
+      thousand tokens saved is worth a fraction of a cent — so the price
+      per call is set to clearly undercut that, not to price the compute.
+    </p>
+  </div>
+</section>
+
+<section id="integrate">
+  <div class="wrap">
+    <p class="kicker">Integration</p>
+    <h2 class="display">One endpoint, three ways to call it.</h2>
+    <div class="terminal mono">
+      <div class="line"><span class="comment"># 1. sign up — returns an API key and a checkout link</span></div>
+      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.dev/v1/signup \</div>
+      <div class="line">    -d '{"email":"you@example.com"}'</div>
+      <div class="line">&nbsp;</div>
+      <div class="line"><span class="comment"># 2. search</span></div>
+      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.dev/v1/search \</div>
+      <div class="line">    -H "Authorization: Bearer obs_..." \</div>
+      <div class="line">    -d '{"query":"retry logic for a failed upload","repo":"axios"}'</div>
+    </div>
+    <div class="integrations">
+      <span class="pill">MCP server — Claude Code, Claude Desktop, Cursor</span>
+      <span class="pill">LangChain tool</span>
+      <span class="pill">CrewAI tool</span>
+      <span class="pill">Raw HTTP — any language</span>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <div class="eyebrow" style="margin-bottom:10px;">
+        <span class="trit-glyph"><span class="on"></span><span></span><span class="on"></span></span>
+        OBSERVE Search API
+      </div>
+      <a class="btn btn-solid" href="#pricing">Get an API key</a>
+    </div>
+    <p class="foot-note">Built on OBSERVE, a local-first semantic code search engine. Every claim on this page traces to a reproducible benchmark, not a projection.</p>
+  </div>
+</footer>

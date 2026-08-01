@@ -67,9 +67,13 @@ POST /v1/search           Authorization: Bearer obs_...
   (that's a real multi-tenant isolation feature, not built here).
 - No rate limiting beyond the credit balance itself -- a key with credits
   can call as fast as it wants. Fine for v1, revisit if abuse shows up.
-- One fixed credit package ($10/1000 credits) -- no tiers, no
-  subscriptions. Change the two env vars if you want a different single
-  price point; multiple simultaneous tiers need real code changes.
+- One fixed credit package ($5/50,000 credits, i.e. 0.01 cent/search) --
+  no tiers, no subscriptions. Priced to clearly undercut the token cost a
+  search saves (see billing.py's comment for the reasoning: OBSERVE's own
+  benchmark is ~66% fewer tokens than plain search, and a search's real
+  marginal compute cost is near-zero), not around infra cost. Change the
+  two env vars if you want a different single price point; multiple
+  simultaneous tiers need real code changes.
 - `index_repos.py` always re-clones from scratch (`--depth 1`) -- simple
   and always-fresh, but re-running it means downtime while the new index
   builds unless you add a blue/green swap (not built -- v1 assumes

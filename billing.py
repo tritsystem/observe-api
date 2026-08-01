@@ -20,10 +20,20 @@ import db
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 
-# One package for v1: $10 -> 1000 credits (1 cent/credit). Change via env
-# vars, not code, so pricing can be tuned without a redeploy.
-PACKAGE_PRICE_CENTS = int(os.environ.get("OBSERVE_PACKAGE_PRICE_CENTS", "1000"))
-PACKAGE_CREDITS = int(os.environ.get("OBSERVE_PACKAGE_CREDITS", "1000"))
+# One package for v1: $5 -> 50,000 credits (0.01 cent/search). Priced
+# deliberately far below the token cost it saves, not around infra cost --
+# a search's real marginal cost is near-zero (milliseconds of CPU for one
+# embedding + matmul against an already-loaded model/index), and OBSERVE's
+# own benchmark is ~66% fewer tokens than plain search on the same query.
+# At typical model API pricing (a few dollars per million tokens), a few
+# thousand tokens saved is worth a fraction of a cent -- the price per
+# search needs to clearly undercut that, or there's no reason for an agent
+# operator to pay instead of just burning more tokens. Fixed costs
+# (hosting) are covered by volume, not by pricing each query near its own
+# compute cost. Change via env vars, not code, so pricing can be tuned
+# without a redeploy.
+PACKAGE_PRICE_CENTS = int(os.environ.get("OBSERVE_PACKAGE_PRICE_CENTS", "500"))
+PACKAGE_CREDITS = int(os.environ.get("OBSERVE_PACKAGE_CREDITS", "50000"))
 
 SUCCESS_URL = os.environ.get("OBSERVE_CHECKOUT_SUCCESS_URL", "https://example.com/success")
 CANCEL_URL = os.environ.get("OBSERVE_CHECKOUT_CANCEL_URL", "https://example.com/cancel")
