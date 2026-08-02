@@ -9,13 +9,27 @@ a general HN audience.
 ---
 
 I've spent a while building OBSERVE, a semantic code search tool that
-runs entirely locally -- fine-tuned embedding model, ternary-quantized
-index, FAISS search. Every number in its README is from a written-up,
-reproducible benchmark, including the ones that make it look bad: grep
-still beats it when you already know the exact function name you're
-looking for. It only earns its keep on the other kind of query -- "where
-does this handle retrying a failed upload" -- where you can describe the
-thing but not name it.
+runs entirely locally -- embedding-based search, FAISS. Every number in
+its README is from a written-up, reproducible benchmark, including the
+ones that make it look bad: grep still beats it when you already know the
+exact function name you're looking for. It only earns its keep on the
+other kind of query -- "where does this handle retrying a failed upload"
+-- where you can describe the thing but not name it.
+
+Before shipping the hosted version I tried fine-tuning the embedding
+model on real code, since that's the obvious next differentiator. Found
+and fixed two real bugs in the original training pipeline first (both
+GitHub-streaming data sources it relied on are dead, and its own
+validation metric was silently broken -- a constant label array making
+Pearson/Spearman correlation undefined, not a training failure).
+Retrained clean on real data. It still came out *worse* than the stock
+embedding model on actual retrieval -- 5% result overlap with stock, 0/20
+exact top-1 matches, several wrong-repo results, on the same 20-query
+benchmark. Root cause looks like a mismatch between training-anchor style
+(function/class names, raw comments) and real query style (full
+natural-language questions). So this ships on stock all-MiniLM-L6-v2, not
+a fine-tune -- I'd rather undersell it than claim a differentiator that
+measured worse than the baseline.
 
 Recently I turned it into a hosted API, because the more interesting
 question wasn't "is this useful" (the benchmarks already answered that)
@@ -48,6 +62,22 @@ near-zero marginal cost per unit does. That's not a new idea, but it's
 one that's easy to skip when you default to pricing around your own
 costs instead of the buyer's alternative.
 
+## What actually differentiates this from GitHub's own code search
+
+Not smarter ranking -- I tested that claim and it didn't hold up (see
+above). What's real: GitHub's code search API can't reach several of the
+most popular repos at all. I checked all 15 in this corpus directly --
+react, django, fastapi, cargo, and tokio return zero results from
+GitHub's search, even for the literal word "the" (large/high-traffic
+repos get excluded from their index). For the repos it *can* reach, a
+natural-language question returns nothing unless you manually strip it
+down to bare keywords -- the API treats a normal question as a literal
+phrase match. And the rate limit is tight enough (~6-10 requests/minute)
+that I hit a 403 partway through running this exact comparison. None of
+that is about AI quality; it's coverage, query format, and being built
+for something that calls it in a loop rather than a person typing a
+handful of searches by hand.
+
 ## What's actually available
 
 - A raw HTTP API: `/v1/signup`, `/v1/search`, `/v1/balance`, `/v1/repos`
@@ -62,9 +92,8 @@ costs instead of the buyer's alternative.
 One shared index, not per-customer -- if you want to search *your own*
 private code through this, that's a real multi-tenant isolation feature
 that doesn't exist yet, not something I'm pretending is already solved.
-No rate limiting beyond the credit balance itself. One fixed credit
-package, no tiers. All disclosed in the repo's README, not hidden
-behind a "contact sales" wall.
+One fixed credit package, no tiers. All disclosed in the repo's README,
+not hidden behind a "contact sales" wall.
 
 [link to landing page]
 [link to GitHub repo]
