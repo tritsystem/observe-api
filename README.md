@@ -92,6 +92,33 @@ POST /v1/search           Authorization: Bearer obs_...
   use the same fundamental approach and would likely also beat grep on
   vocabulary-mismatch queries. "Beats grep" isn't the same claim as "beats
   the actual competition," and that comparison hasn't been run.
+- **Not actually using a fine-tuned embedding model, by design, after
+  testing one.** `MODEL_PATH` defaults to stock
+  `sentence-transformers/all-MiniLM-L6-v2`. The original
+  012-trit-search fine-tune (`trit_embed_train.py`) turned out broken on
+  inspection: both of its GitHub-streaming data sources are dead (one
+  gated without auth, one uses a dataset-script format HF no longer
+  supports), so every language's training pairs came back empty and it
+  trained on local-repo-only data; its own validation also logged NaN for
+  every epoch (`EmbeddingSimilarityEvaluator` fed a constant `1.0` label
+  array -- correlation against a constant is undefined by definition, a
+  real bug, not a training failure). Both were fixed (`_retrain_finetune.py`:
+  real pairs mined from this repo's own 15-repo corpus, no external dataset
+  dependency; a bug-free held-out self-retrieval check instead of the
+  broken evaluator) and retrained -- the new model scored a clean 86%
+  self-retrieval accuracy on held-out pairs, but then measured WORSE than
+  stock on real open-domain retrieval (`_benchmark_finetuned_vs_stock.py`:
+  5% top-10 overlap with stock, 0/20 top-1 matches, several wrong-repo
+  top-1 results). Root cause: training anchors are function/class names
+  and raw comments, not natural-language questions -- a real usage query
+  like "how does useState schedule a re-render" doesn't resemble the
+  training data's anchor style, so the fine-tune likely pulled the
+  embedding space toward name-matching at the expense of the
+  question-answering behavior this product actually needs. A properly
+  targeted retrain (real natural-language-question anchors, e.g.
+  LLM-generated per chunk) might work; this one, evidence in hand,
+  doesn't. Don't re-enable `code-minilm-v2` (or the original checkpoint)
+  without a benchmark proving it beats stock first.
 - One fixed credit package ($5/50,000 credits, i.e. 0.01 cent/search) --
   no tiers, no subscriptions. Priced to clearly undercut the token cost a
   search saves (see billing.py's comment for the reasoning: OBSERVE's own
