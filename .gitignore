@@ -6,5 +6,6 @@ repos/
 repo_manifest.json
 __pycache__/
 *.pyc
+.pytest_cache/
+.test-deps/
 .venv/
-data/
