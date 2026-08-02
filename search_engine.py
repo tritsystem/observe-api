@@ -42,11 +42,16 @@ def unpack_ternary(packed, orig_dim):
 
 
 class SearchEngine:
-    def __init__(self):
+    def __init__(self, shared_model=None):
+        # shared_model: an already-loaded SentenceTransformer to reuse across
+        # multiple SearchEngine instances (e.g. one per tenant in
+        # tenant_index.py) -- avoids loading N redundant copies of the same
+        # ~90MB model into memory/VRAM when many small per-tenant indexes
+        # are active at once.
         self.index      = None
         self.metadata   = []
         self.path_table = []
-        self.model      = None
+        self.model      = shared_model
         self.ready      = False
         self.status     = "Not initialized"
 
@@ -57,8 +62,9 @@ class SearchEngine:
                 import numpy as np
                 from sentence_transformers import SentenceTransformer
 
-                on_status("Loading model...")
-                self.model = SentenceTransformer(model_path)
+                if self.model is None:
+                    on_status("Loading model...")
+                    self.model = SentenceTransformer(model_path)
 
                 f32_path  = os.path.join(index_dir, "vectors_float32.npy")
                 trit_path = os.path.join(index_dir, "vectors_ternary.npy")

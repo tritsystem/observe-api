@@ -16,11 +16,18 @@ from pydantic import BaseModel, EmailStr
 import billing
 import db
 import rate_limit
+import tenant_index
 from search_engine import SearchEngine
 
 INDEX_DIR = os.environ.get("OBSERVE_INDEX_DIR", "/data/observe-index")
 MODEL_PATH = os.environ.get("OBSERVE_MODEL_PATH", "sentence-transformers/all-MiniLM-L6-v2")
 CREDITS_PER_SEARCH = int(os.environ.get("OBSERVE_CREDITS_PER_SEARCH", "1"))
+# Indexing a private repo is a real, one-time compute cost (clone + embed
+# every chunk, real minutes -- see this project's own corpus build), unlike
+# a search's near-zero marginal cost. Priced separately, not folded into
+# the per-search price. Not refunded on a failed index (e.g. bad git_url) --
+# a disclosed v1 simplification, not an oversight.
+CREDITS_PER_PRIVATE_INDEX = int(os.environ.get("OBSERVE_CREDITS_PER_PRIVATE_INDEX", "2000"))
 
 engine = SearchEngine()
 
@@ -121,6 +128,94 @@ def list_repos():
     """Which repos are actually indexed and searchable right now -- an agent
     should call this before assuming a `repo` filter name is valid."""
     return {"repos": sorted(REPO_REGISTRY.get().keys())}
+
+
+class PrivateIndexRequest(BaseModel):
+    git_url: str  # https://github.com|gitlab.com|bitbucket.org/<owner>/<repo> -- see tenant_index.py
+
+
+class PrivateIndexResponse(BaseModel):
+    status: str
+    credits_remaining: int
+
+
+@app.post("/v1/private/index", response_model=PrivateIndexResponse)
+def private_index(req: PrivateIndexRequest, authorization: Optional[str] = Header(None)):
+    raw_key = _require_key(authorization)
+    key_hash = db.hash_key(raw_key)
+
+    try:
+        tenant_index.validate_git_url(req.git_url)
+    except tenant_index.InvalidGitUrl as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    existing = tenant_index.get_status(key_hash)
+    if existing.get("state") == "indexing":
+        raise HTTPException(status_code=409, detail="already indexing a repo -- check /v1/private/status first")
+
+    # Charged on start, not refunded on failure (see CREDITS_PER_PRIVATE_INDEX
+    # comment) -- this is a real compute cost regardless of whether the
+    # repo the caller pointed at turns out valid.
+    if not db.deduct_credit(raw_key, CREDITS_PER_PRIVATE_INDEX):
+        raise HTTPException(status_code=402, detail=f"insufficient credits -- indexing costs {CREDITS_PER_PRIVATE_INDEX}")
+
+    try:
+        tenant_index.manager.start_indexing(key_hash, req.git_url)
+    except RuntimeError as e:
+        db.deduct_credit(raw_key, -CREDITS_PER_PRIVATE_INDEX)  # refund -- didn't actually start
+        raise HTTPException(status_code=409, detail=str(e))
+
+    record = db.get_key_record(raw_key)
+    return PrivateIndexResponse(status="indexing", credits_remaining=record["credits"])
+
+
+@app.get("/v1/private/status")
+def private_status(authorization: Optional[str] = Header(None)):
+    raw_key = _require_key(authorization)
+    return tenant_index.get_status(db.hash_key(raw_key))
+
+
+class PrivateSearchRequest(BaseModel):
+    query: str
+    k: int = 10
+
+
+@app.post("/v1/private/search", response_model=SearchResponse)
+def private_search(req: PrivateSearchRequest, authorization: Optional[str] = Header(None)):
+    raw_key = _require_key(authorization)
+    key_hash = db.hash_key(raw_key)
+
+    if not rate_limit.allow(raw_key):
+        raise HTTPException(status_code=429, detail="rate limit exceeded -- slow down and retry shortly")
+    if req.k < 1 or req.k > 50:
+        raise HTTPException(status_code=400, detail="k must be between 1 and 50")
+    if not req.query.strip():
+        raise HTTPException(status_code=400, detail="query must not be empty")
+
+    # 404, not an empty 200 -- "no private index" and "your index has no
+    # matches for this query" are different facts, and an agent deciding
+    # whether to call /v1/private/index needs to be able to tell them apart.
+    status = tenant_index.get_status(key_hash)
+    if status.get("state") != "ready":
+        raise HTTPException(status_code=404, detail=f"no ready private index for this key (state: {status.get('state', 'none')}) -- see /v1/private/index")
+
+    if not db.deduct_credit(raw_key, CREDITS_PER_SEARCH):
+        raise HTTPException(status_code=402, detail="insufficient credits -- purchase more via /v1/signup")
+
+    try:
+        raw_results = tenant_index.manager.search(key_hash, req.query, k=req.k)
+    except Exception:
+        db.deduct_credit(raw_key, -CREDITS_PER_SEARCH)
+        raise HTTPException(status_code=500, detail="search failed -- credit refunded, please retry")
+
+    record = db.get_key_record(raw_key)
+    return SearchResponse(
+        results=[
+            SearchResult(score=r["score"], path=r["path"], preview=r["preview"], repo=None)
+            for r in (raw_results or [])
+        ],
+        credits_remaining=record["credits"],
+    )
 
 
 class SignupRequest(BaseModel):

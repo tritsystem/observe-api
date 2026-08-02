@@ -59,17 +59,46 @@ GET  /v1/repos            -> {"repos": ["react", "django", ...]}
 POST /v1/search           Authorization: Bearer obs_...
                            {"query": "...", "k": 10, "repo": "react"}  (repo optional)
                            -> {"results": [{"score", "path", "preview", "repo"}], "credits_remaining": N}
+
+POST /v1/private/index    Authorization: Bearer obs_...  {"git_url": "https://github.com/<owner>/<repo>"}
+                           -> {"status": "indexing", "credits_remaining": N}  (github.com/gitlab.com/bitbucket.org only)
+GET  /v1/private/status   Authorization: Bearer obs_...  -> {"state": "none"|"indexing"|"ready"|"error", ...}
+POST /v1/private/search   Authorization: Bearer obs_...  {"query": "...", "k": 10}
+                           -> same shape as /v1/search, scoped to ONLY this key's own indexed repo
+                           -> 404 if this key has no ready private index yet
 ```
 
 ## Honest limitations (v1, disclosed not hidden)
 
-- Single shared index, not per-customer. Fine for "search our curated
-  corpus," not a fit for "let customers index their own private repos"
-  (that's a real multi-tenant isolation feature, not built here). This is
-  also the actual scalability ceiling -- query throughput scales fine
-  (stateless replicas behind a load balancer, same read-only index file),
-  but the addressable market is capped at "agents searching this fixed
-  15-repo corpus" until real per-tenant indexing exists.
+- **Private per-tenant indexing is now built** (`tenant_index.py`,
+  `POST /v1/private/index` + `GET /v1/private/status` +
+  `POST /v1/private/search`) -- an API key can index their own repo,
+  isolated from the shared 15-repo corpus and from every other tenant.
+  Isolation is structural: each tenant's clone + index lives under a
+  directory named by their key_hash, so a caller can't reach another
+  tenant's data without already knowing that tenant's raw API key.
+  Verified adversarially, not just by code review: two tenants indexed
+  different real repos (pallets/itsdangerous, pallets/click), and each
+  one's private search returned ONLY its own repo's files at k=10, even
+  when explicitly querying for a concept that only exists in the other
+  tenant's code. A key with no private index gets a real 404, not a
+  misleading empty 200.
+  - v1 scope, disclosed: `git_url` is restricted to https:// URLs on
+    github.com/gitlab.com/bitbucket.org (a real SSRF/local-file-read risk
+    otherwise -- accepting an arbitrary server-side `git clone` target
+    from user input is a documented vulnerability class, not a
+    hypothetical). Self-hosted git servers aren't supported yet.
+  - Indexing is synchronous-triggered/background-executed (real minutes
+    for a real repo) with a status you poll -- there's no webhook/push
+    notification when it finishes.
+  - Each tenant's SearchEngine instance is cached in memory after first
+    use (LRU-capped, default 20), sharing one loaded embedding model
+    across all of them -- not built for thousands of concurrent active
+    tenants, fine for a v1 scale of usage.
+  - Indexing costs credits up front (`OBSERVE_CREDITS_PER_PRIVATE_INDEX`,
+    default 2000) and isn't refunded if the indexing job itself fails
+    partway (a bad git_url is caught before charging; a crash mid-embed
+    is not refunded) -- disclosed, not hidden.
 - Per-key rate limiting (`rate_limit.py`, in-memory token bucket) now caps
   request RATE separately from the credit system's cost cap -- verified
   with a real 20-request concurrent burst (17 succeeded, 3 correctly got
