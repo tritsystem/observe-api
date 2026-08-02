@@ -7,6 +7,7 @@ fully automated end to end -- no human review in the signup/payment/search
 loop.
 """
 import os
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -21,17 +22,20 @@ INDEX_DIR = os.environ.get("OBSERVE_INDEX_DIR", "/data/observe-index")
 MODEL_PATH = os.environ.get("OBSERVE_MODEL_PATH", "sentence-transformers/all-MiniLM-L6-v2")
 CREDITS_PER_SEARCH = int(os.environ.get("OBSERVE_CREDITS_PER_SEARCH", "1"))
 
-app = FastAPI(title="OBSERVE Search API", version="1.0.0")
 engine = SearchEngine()
 
 
-@app.on_event("startup")
-def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     db.init_db()
     # Blocking on purpose -- the process shouldn't accept traffic before the
     # model + index are actually loaded and ready to serve real results.
     status = engine.load_blocking(INDEX_DIR, MODEL_PATH)
     print(f"[startup] engine ready: {status}")
+    yield
+
+
+app = FastAPI(title="OBSERVE Search API", version="1.0.0", lifespan=lifespan)
 
 
 def _require_key(authorization: Optional[str]) -> str:
