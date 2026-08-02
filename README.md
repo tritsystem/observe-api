@@ -70,11 +70,12 @@ POST /v1/search           Authorization: Bearer obs_...
   (stateless replicas behind a load balancer, same read-only index file),
   but the addressable market is capped at "agents searching this fixed
   15-repo corpus" until real per-tenant indexing exists.
-- No rate limiting beyond the credit balance itself -- a key with credits
-  can call as fast as it wants. The credit system bounds total cost of
-  abuse, but not a noisy-neighbor scenario (one key blasting its whole
-  balance in a tight loop, starving other concurrent callers on a single
-  process). Fine for a v1 test deploy, a real gap before public launch.
+- Per-key rate limiting (`rate_limit.py`, in-memory token bucket) now caps
+  request RATE separately from the credit system's cost cap -- verified
+  with a real 20-request concurrent burst (17 succeeded, 3 correctly got
+  429, credit deduction matched exactly). Still in-memory/per-process,
+  though -- a multi-process or multi-host deployment would need a shared
+  store (Redis) instead, not built here.
 - **Serves float32 embeddings, not ternary-quantized**, despite
   `search_engine.py` supporting both (`build_index(..., quantize=True)`).
   Measured via `_benchmark_ternary_vs_float32.py` on 20 real queries across
