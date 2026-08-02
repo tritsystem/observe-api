@@ -84,7 +84,11 @@ def build_index(manifest: dict):
     def on_done():
         done["flag"] = True
 
-    engine.build_index(list(manifest.values()), INDEX_DIR, on_status, on_done)
+    # quantize=False: measured (_benchmark_ternary_vs_float32.py) a 40% top-1
+    # flip rate and only 70% top-10 overlap vs. float32 on real queries here --
+    # not worth it at this corpus's size (353MB float32 is trivial to serve
+    # directly), so this deployment keeps full precision.
+    engine.build_index(list(manifest.values()), INDEX_DIR, on_status, on_done, model_path=MODEL_PATH, quantize=False)
 
     import time
     start = time.time()

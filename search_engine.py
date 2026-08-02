@@ -60,12 +60,29 @@ class SearchEngine:
                 on_status("Loading model...")
                 self.model = SentenceTransformer(model_path)
 
+                f32_path  = os.path.join(index_dir, "vectors_float32.npy")
                 trit_path = os.path.join(index_dir, "vectors_ternary.npy")
                 trit_meta_path = os.path.join(index_dir, "vectors_meta.json")
                 idx_path  = os.path.join(index_dir, "faiss.index")
                 meta_path = os.path.join(index_dir, "metadata.json")
 
-                if os.path.exists(trit_path) and os.path.exists(meta_path):
+                if os.path.exists(f32_path) and os.path.exists(meta_path):
+                    # Real measured tradeoff (see _benchmark_ternary_vs_float32.py):
+                    # ternary quantization changed the top-1 result 40% of the
+                    # time and top-10 overlap averaged only 70% vs. this exact
+                    # float32 index, on 20 real queries across all 15 repos --
+                    # not free. At this corpus's actual size (353MB), disk/RAM
+                    # was never the real constraint, so this deployment serves
+                    # the unquantized index instead of trading real result
+                    # quality for a compression win it didn't need.
+                    on_status("Loading float32 index...")
+                    self.index    = np.load(f32_path).astype("float32")
+                    raw = json.load(open(meta_path, encoding="utf-8"))
+                    self.path_table = raw.get("paths", [])
+                    self.metadata   = raw.get("chunks", [])
+                    on_status(f"Ready - {len(self.metadata):,} chunks indexed "
+                              f"({self.index.nbytes/1e6:.2f}MB on disk, full precision). Start searching!")
+                elif os.path.exists(trit_path) and os.path.exists(meta_path):
                     on_status("Loading ternary-compressed index...")
                     packed = np.load(trit_path)
                     dim    = json.load(open(trit_meta_path)).get("dim", 384) if os.path.exists(trit_meta_path) else 384
@@ -157,7 +174,7 @@ class SearchEngine:
                     })
         return results
 
-    def build_index(self, scan_dirs, index_dir, on_status, on_done):
+    def build_index(self, scan_dirs, index_dir, on_status, on_done, model_path="sentence-transformers/all-MiniLM-L6-v2", quantize=True):
         def _build():
             try:
                 import faiss, numpy as np
@@ -165,6 +182,7 @@ class SearchEngine:
 
                 if self.model is None:
                     on_status("Loading model...")
+                    self.model = SentenceTransformer(model_path)
 
                 EXTS = {".py",".gd",".js",".ts",".cs",".rs",".go",
                         ".c",".cpp",".h",".java",".lua",".rb",".php",
@@ -242,19 +260,39 @@ class SearchEngine:
 
                 vecs = np.vstack(vecs).astype("float32")
 
-                # Ternary compression: quantize to {-1,0,+1}, then bit-pack
-                # 5 trits/byte (3^5=243<256) for the real ~20x reduction vs
-                # float32. Query stays float32 at search time (asymmetric).
-                t = 0.7 * np.abs(vecs).mean()
-                trit_vecs = np.where(vecs > t, 1, np.where(vecs < -t, -1, 0)).astype("int8")
-                packed    = pack_ternary(trit_vecs)
-
                 old_index = os.path.join(index_dir, "faiss.index")
                 if os.path.exists(old_index):
                     os.remove(old_index)
-                np.save(os.path.join(index_dir, "vectors_ternary.npy"), packed)
-                json.dump({"dim": int(vecs.shape[1])},
-                          open(os.path.join(index_dir, "vectors_meta.json"), "w"))
+
+                if quantize:
+                    # Ternary compression: quantize to {-1,0,+1}, then bit-pack
+                    # 5 trits/byte (3^5=243<256) for the real ~20x reduction vs
+                    # float32. Query stays float32 at search time (asymmetric).
+                    # Measured cost (_benchmark_ternary_vs_float32.py): only
+                    # 70% top-10 overlap / 60% top-1 match vs. the exact
+                    # float32 index on 20 real queries -- worth it only when
+                    # disk/RAM at this corpus's size is the real constraint.
+                    t = 0.7 * np.abs(vecs).mean()
+                    trit_vecs = np.where(vecs > t, 1, np.where(vecs < -t, -1, 0)).astype("int8")
+                    packed    = pack_ternary(trit_vecs)
+                    stale_f32 = os.path.join(index_dir, "vectors_float32.npy")
+                    if os.path.exists(stale_f32):
+                        os.remove(stale_f32)
+                    np.save(os.path.join(index_dir, "vectors_ternary.npy"), packed)
+                    json.dump({"dim": int(vecs.shape[1])},
+                              open(os.path.join(index_dir, "vectors_meta.json"), "w"))
+                    self.index = trit_vecs.astype("float32")
+                    size_mb  = packed.nbytes / 1e6
+                    float_mb = vecs.nbytes / 1e6
+                    size_note = f"{size_mb:.2f}MB packed-ternary vs {float_mb:.2f}MB float32, {float_mb/size_mb:.1f}x smaller"
+                else:
+                    stale_trit = os.path.join(index_dir, "vectors_ternary.npy")
+                    stale_meta = os.path.join(index_dir, "vectors_meta.json")
+                    if os.path.exists(stale_trit): os.remove(stale_trit)
+                    if os.path.exists(stale_meta): os.remove(stale_meta)
+                    np.save(os.path.join(index_dir, "vectors_float32.npy"), vecs)
+                    self.index = vecs
+                    size_note = f"{vecs.nbytes/1e6:.2f}MB float32, full precision (no quantization)"
 
                 # Deduplicate paths into a small table; store only a path
                 # index + byte offset per chunk (preview regenerated lazily
@@ -273,20 +311,17 @@ class SearchEngine:
                           open(os.path.join(index_dir, "metadata.json"), "w", encoding="utf-8"),
                           ensure_ascii=False, separators=(",", ":"))
 
-                # Disk file stays packed (19.9x compressed); keep the
-                # unpacked float32 view in memory for fast search.
-                self.index      = trit_vecs.astype("float32")
                 self.metadata   = rows
                 self.path_table = path_table
                 self.ready      = True
-                size_mb  = packed.nbytes / 1e6
-                float_mb = vecs.nbytes / 1e6
-                on_status(f"Index complete -- {len(chunks):,} chunks, {files:,} files "
-                          f"({size_mb:.2f}MB packed-ternary vs {float_mb:.2f}MB float32, "
-                          f"{float_mb/size_mb:.1f}x smaller)")
-                on_done()
+                on_status(f"Index complete -- {len(chunks):,} chunks, {files:,} files ({size_note})")
             except Exception as e:
                 on_status(f"Index error: {e}")
+            finally:
+                # A caller polling on_done() (e.g. index_repos.py) must never
+                # hang until its own timeout just because this thread failed --
+                # on_done() fires exactly once whether _build succeeded or not.
+                on_done()
         threading.Thread(target=_build, daemon=True).start()
 
     def load_blocking(self, index_dir, model_path, timeout=180):

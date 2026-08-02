@@ -6,12 +6,13 @@ fully automated signup-to-search loop -- no human review anywhere in that
 path.
 
 Built on top of [OBSERVE](https://github.com/gbranaa4-hue/012-trit-search)'s
-existing `SearchEngine` (ternary-quantized embeddings, FAISS-backed,
-function-boundary chunking) -- `search_engine.py` here is that class
-extracted from OBSERVE's desktop GUI file into a standalone module with no
-GUI dependency, so a headless server can import it cleanly. See the
-extraction notes at the bottom of `search_engine.py` for exactly what
-changed.
+existing `SearchEngine` (embedding-based semantic search, function-boundary
+chunking) -- `search_engine.py` here is that class extracted from OBSERVE's
+desktop GUI file into a standalone module with no GUI dependency, so a
+headless server can import it cleanly. See the extraction notes at the
+bottom of `search_engine.py` for exactly what changed. This deployment
+serves float32 (not ternary-quantized) embeddings -- see "Honest
+limitations" below for the measured reason why.
 
 ## What's real vs. what's still TODO
 
@@ -64,9 +65,32 @@ POST /v1/search           Authorization: Bearer obs_...
 
 - Single shared index, not per-customer. Fine for "search our curated
   corpus," not a fit for "let customers index their own private repos"
-  (that's a real multi-tenant isolation feature, not built here).
+  (that's a real multi-tenant isolation feature, not built here). This is
+  also the actual scalability ceiling -- query throughput scales fine
+  (stateless replicas behind a load balancer, same read-only index file),
+  but the addressable market is capped at "agents searching this fixed
+  15-repo corpus" until real per-tenant indexing exists.
 - No rate limiting beyond the credit balance itself -- a key with credits
-  can call as fast as it wants. Fine for v1, revisit if abuse shows up.
+  can call as fast as it wants. The credit system bounds total cost of
+  abuse, but not a noisy-neighbor scenario (one key blasting its whole
+  balance in a tight loop, starving other concurrent callers on a single
+  process). Fine for a v1 test deploy, a real gap before public launch.
+- **Serves float32 embeddings, not ternary-quantized**, despite
+  `search_engine.py` supporting both (`build_index(..., quantize=True)`).
+  Measured via `_benchmark_ternary_vs_float32.py` on 20 real queries across
+  all 15 repos: ternary quantization changed the top-1 result 40% of the
+  time and averaged only 70% top-10 overlap vs. the exact float32 index --
+  a real quality cost, not free. At this corpus's actual size (353MB
+  float32), disk/RAM was never the real constraint, so the quality cost
+  wasn't worth paying. Ternary quantization remains the right call for the
+  desktop tool (a user's own local disk is a real constraint there); it
+  wasn't re-verified as worthwhile for a server you control.
+- Only benchmarked against plain grep (see `launch/show-hn.md`), not
+  against other semantic/embedding-based code search tools (GitHub code
+  search, Sourcegraph, or a vanilla embedding+vector-DB pipeline) -- those
+  use the same fundamental approach and would likely also beat grep on
+  vocabulary-mismatch queries. "Beats grep" isn't the same claim as "beats
+  the actual competition," and that comparison hasn't been run.
 - One fixed credit package ($5/50,000 credits, i.e. 0.01 cent/search) --
   no tiers, no subscriptions. Priced to clearly undercut the token cost a
   search saves (see billing.py's comment for the reasoning: OBSERVE's own

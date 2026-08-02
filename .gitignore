@@ -6,3 +6,5 @@ repos/
 repo_manifest.json
 __pycache__/
 *.pyc
+.venv/
+data/
