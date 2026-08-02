@@ -14,6 +14,7 @@ from pydantic import BaseModel, EmailStr
 
 import billing
 import db
+import rate_limit
 from search_engine import SearchEngine
 
 INDEX_DIR = os.environ.get("OBSERVE_INDEX_DIR", "/data/observe-index")
@@ -64,6 +65,13 @@ class SearchResponse(BaseModel):
 @app.post("/v1/search", response_model=SearchResponse)
 def search(req: SearchRequest, authorization: Optional[str] = Header(None)):
     raw_key = _require_key(authorization)
+
+    # Rate limit BEFORE the credit deduct/search work below -- credits alone
+    # bound cost, not request rate, so a key with a large balance could
+    # otherwise blast it in a tight loop and starve other concurrent callers
+    # on this process (see rate_limit.py).
+    if not rate_limit.allow(raw_key):
+        raise HTTPException(status_code=429, detail="rate limit exceeded -- slow down and retry shortly")
 
     if req.k < 1 or req.k > 50:
         raise HTTPException(status_code=400, detail="k must be between 1 and 50")
