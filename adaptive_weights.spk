@@ -1,0 +1,37 @@
+# Adaptive evidence-weight learner -- one neuron per evidence kind, all
+# connected to a shared `verdict` neuron via STDP-plastic synapses.
+#
+# Real historical replay (see spiking_adaptive_weights.py) drives
+# `verdict` at the moment ground truth confirms a concept was genuinely
+# used, then drives the evidence-kind neuron that fired for that case
+# shortly after. Spikeling's real STDP rule (core/runtime/runtime.py's
+# STDPLearner, triggered here via learn=STDP) strengthens a synapse in
+# proportion to how RECENTLY its downstream neuron (verdict) last fired
+# -- so an evidence kind that keeps showing up right after real
+# confirmed-positive outcomes earns a higher learned weight over time,
+# instead of a hand-tuned constant.
+#
+# HONEST LIMITATION (see spiking_adaptive_weights.py's docstring): in
+# strict forward-chronological replay, this specific STDP formula's
+# dt = t - downstream.last_spike_time is never negative, so it can only
+# ever reinforce (LTP) upward from the initial weight, never actively
+# punish a kind that's frequently wrong (LTD never triggers this way).
+# A consistently-false-positive-prone kind simply stays near its initial
+# weight rather than being suppressed below it -- disclosed, not hidden.
+
+neuron ev_disk_glob   threshold=100 leak=10
+neuron ev_test_grep   threshold=100 leak=10
+neuron ev_sqlite      threshold=100 leak=10
+neuron ev_jsonl_field threshold=100 leak=10
+neuron ev_http_api    threshold=100 leak=10
+neuron verdict        threshold=100 leak=10
+
+connect ev_disk_glob   -> verdict weight=0.3
+connect ev_test_grep   -> verdict weight=0.3
+connect ev_sqlite      -> verdict weight=0.3
+connect ev_jsonl_field -> verdict weight=0.3
+connect ev_http_api    -> verdict weight=0.3
+
+learn=STDP rate=0.08
+
+refractory=0ms
