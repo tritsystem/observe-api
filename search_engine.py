@@ -10,8 +10,40 @@ true ~1.6 bits/value, the real ~20x compression vs float32 (32 bits/value).
 """
 import json
 import os
+import re
 import threading
 from pathlib import Path
+
+# Hybrid search tuning -- see _benchmark_hybrid_rerank.py for the measured
+# comparison this is based on. Retrieve-then-rerank (dense top-N candidates,
+# then a dense-dominant weighted blend with BM25 WITHIN that pool) beat both
+# pure dense-only and naive full-corpus dense+BM25 RRF fusion on the same
+# 20-query/15-repo benchmark: it fully preserved the 2 cases where naive
+# fusion had lost the actually-correct answer to lexical noise (flask's
+# scaffold.py, svelte's reactivity/set.js), and eliminated cross-repo/
+# cross-language contamination (an unrelated Go file surfacing for an
+# Express query) since a candidate has to already be dense-similar to be
+# considered at all -- BM25 can only reorder within that pool, never
+# introduce a new candidate purely on lexical overlap. Real, measured
+# tradeoff: it can't reach a genuinely correct answer dense missed entirely
+# (lost 2 such wins the naive fusion had) -- safety over reach, a deliberate
+# choice given the failure modes above were the more damaging kind.
+HYBRID_N_CANDIDATES = 30
+HYBRID_ALPHA = 0.7  # weight on dense score; (1-HYBRID_ALPHA) on BM25, within the candidate pool
+
+
+def _tokenize(text):
+    """Lowercase + split on non-alnum; also split snake_case boundaries into
+    sub-tokens (keeping the whole token too) so a natural-language query has
+    a better chance of lexically matching identifier pieces, not just whole-
+    identifier exact matches. Same tokenizer used in the benchmark scripts."""
+    raw = re.findall(r"[A-Za-z0-9]+", text.lower())
+    tokens = list(raw)
+    for tok in re.findall(r"[A-Za-z0-9_]+", text.lower()):
+        parts = [p for p in tok.split("_") if p]
+        if len(parts) > 1:
+            tokens.extend(parts)
+    return tokens
 
 
 def pack_ternary(trits):
@@ -54,6 +86,8 @@ class SearchEngine:
         self.model      = shared_model
         self.ready      = False
         self.status     = "Not initialized"
+        self.bm25       = None  # built lazily in load() -- see _build_bm25_index
+        self._file_text_cache = {}
 
     def load(self, index_dir, model_path, on_status):
         def _load():
@@ -88,6 +122,7 @@ class SearchEngine:
                     self.metadata   = raw.get("chunks", [])
                     on_status(f"Ready - {len(self.metadata):,} chunks indexed "
                               f"({self.index.nbytes/1e6:.2f}MB on disk, full precision). Start searching!")
+                    self._build_bm25_index(on_status)
                 elif os.path.exists(trit_path) and os.path.exists(meta_path):
                     on_status("Loading ternary-compressed index...")
                     packed = np.load(trit_path)
@@ -102,6 +137,7 @@ class SearchEngine:
                     self.metadata   = raw.get("chunks", [])
                     on_status(f"Ready - {len(self.metadata):,} chunks indexed "
                               f"({disk_mb:.2f}MB on disk, 19.9x compressed). Start searching!")
+                    self._build_bm25_index(on_status)
                 elif os.path.exists(idx_path) and os.path.exists(meta_path):
                     on_status("Loading index...")
                     self.index    = faiss.read_index(idx_path)
@@ -118,7 +154,7 @@ class SearchEngine:
                 self.ready = True
         threading.Thread(target=_load, daemon=True).start()
 
-    def search(self, query, k=10, base_dir_filter=None):
+    def search(self, query, k=10, base_dir_filter=None, hybrid=True):
         if not self.ready or self.index is None or self.model is None:
             return []
         import numpy as np
@@ -145,8 +181,12 @@ class SearchEngine:
             sims = self.index @ vec[0]
             if chunk_mask is not None:
                 sims = np.where(chunk_mask, sims, -np.inf)
-            top  = np.argsort(-sims)[:min(k, len(sims))]
-            scores, indices = sims[top], top
+
+            if hybrid and self.bm25 is not None:
+                scores, indices = self._hybrid_rerank(query, sims, k)
+            else:
+                top  = np.argsort(-sims)[:min(k, len(sims))]
+                scores, indices = sims[top], top
         else:
             scores0, indices0 = self.index.search(vec, min(k, self.index.ntotal))
             scores, indices = scores0[0], indices0[0]
@@ -179,6 +219,89 @@ class SearchEngine:
                         "offset":  m.get("offset"),
                     })
         return results
+
+    def _hybrid_rerank(self, query, sims, k):
+        """Retrieve-then-rerank: take the dense embedding's own top-N
+        candidates, then re-rank ONLY those with a dense-dominant weighted
+        blend against BM25 (see HYBRID_N_CANDIDATES/HYBRID_ALPHA above for
+        why this shape specifically -- measured against pure dense-only and
+        against naive full-corpus dense+BM25 RRF fusion in
+        _benchmark_hybrid_rerank.py). Falls back to plain dense-only ranking
+        on any failure -- a hybrid-path bug must never be able to break a
+        search that would otherwise have worked."""
+        import numpy as np
+        try:
+            n_candidates = min(HYBRID_N_CANDIDATES, len(sims))
+            dense_order = np.argsort(-sims)
+            candidates = dense_order[:n_candidates]
+            # -inf entries only come from base_dir_filter masking (a small
+            # project can have fewer valid chunks than n_candidates) -- drop
+            # them so a filtered-out chunk can't get reranked back in.
+            candidates = candidates[sims[candidates] != -np.inf]
+            if len(candidates) == 0:
+                top = dense_order[:min(k, len(sims))]
+                return sims[top], top
+
+            cand_dense = sims[candidates]
+            cand_bm25 = np.asarray(self.bm25.get_scores(_tokenize(query)))[candidates]
+
+            d_min, d_max = cand_dense.min(), cand_dense.max()
+            b_min, b_max = cand_bm25.min(), cand_bm25.max()
+            dense_norm = (cand_dense - d_min) / (d_max - d_min + 1e-9)
+            bm25_norm  = (cand_bm25 - b_min) / (b_max - b_min + 1e-9)
+            combined = HYBRID_ALPHA * dense_norm + (1 - HYBRID_ALPHA) * bm25_norm
+
+            order = np.argsort(-combined)[:min(k, len(candidates))]
+            top_indices = candidates[order]
+            return sims[top_indices], top_indices
+        except Exception:
+            top = np.argsort(-sims)[:min(k, len(sims))]
+            return sims[top], top
+
+    def _reconstruct_chunk_text(self, base_dir, rel_path, offset):
+        """Chunk text isn't stored in the index (only path+offset, to keep
+        metadata.json small) -- BM25 needs the actual text, so re-read the
+        file once (cached) and re-slice the same [offset:offset+800] window
+        build_index() embedded, so the BM25 corpus and the dense vectors
+        represent identical content."""
+        key = (base_dir, rel_path)
+        text = self._file_text_cache.get(key)
+        if text is None:
+            try:
+                text = Path(base_dir, rel_path).read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                text = ""
+            self._file_text_cache[key] = text
+        return f"file:{rel_path}\n{text[offset:offset+800]}"
+
+    def _build_bm25_index(self, on_status):
+        """Builds the lexical index _hybrid_rerank uses, over the same
+        chunks/order as the dense vectors. Never allowed to break an
+        otherwise-successful load: any failure here (rank_bm25 missing, a
+        file that vanished since indexing, etc.) leaves self.bm25 as None,
+        and search() silently stays dense-only."""
+        try:
+            from rank_bm25 import BM25Okapi
+        except ImportError:
+            on_status("Hybrid search unavailable (rank_bm25 not installed) -- dense-only.")
+            return
+
+        try:
+            if not self.path_table or not self.metadata:
+                return
+            corpus_texts = []
+            for m in self.metadata:
+                if not (isinstance(m, list) and len(m) == 2):
+                    corpus_texts.append("")  # legacy-format row -- keep BM25 index-aligned, contributes nothing
+                    continue
+                p_idx, offset = m
+                p = self.path_table[p_idx]
+                corpus_texts.append(self._reconstruct_chunk_text(p["base_dir"], p["rel_path"], offset))
+            tokenized = [_tokenize(t) for t in corpus_texts]
+            self.bm25 = BM25Okapi(tokenized)
+        except Exception as e:
+            self.bm25 = None
+            on_status(f"Hybrid search index build failed ({e}) -- continuing dense-only.")
 
     def build_index(self, scan_dirs, index_dir, on_status, on_done, model_path="sentence-transformers/all-MiniLM-L6-v2", quantize=True):
         def _build():

@@ -208,6 +208,16 @@ def private_search(req: PrivateSearchRequest, authorization: Optional[str] = Hea
         db.deduct_credit(raw_key, -CREDITS_PER_SEARCH)
         raise HTTPException(status_code=500, detail="search failed -- credit refunded, please retry")
 
+    # Real bug, caught live by actually running a private search and then
+    # querying usage_log for it: this call was missing entirely, so a
+    # successful, credit-charged private search left zero trace in the
+    # table meant to record API usage -- undercounting real activity with
+    # no error or warning anywhere. "__private__" (not a real shared-repo
+    # name, so it can't collide with one) marks these rows as private-index
+    # searches, distinguishable from shared-search rows in the same table
+    # without a schema migration.
+    db.log_usage(raw_key, req.query, "__private__", len(raw_results or []))
+
     record = db.get_key_record(raw_key)
     return SearchResponse(
         results=[

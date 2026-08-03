@@ -50,6 +50,24 @@ python index_repos.py  # clones repos + builds the index (slow, run once)
 uvicorn server:app --reload
 ```
 
+**Testing search without real Stripe keys**: `/v1/signup` needs a live
+`STRIPE_SECRET_KEY` (it creates a real Checkout session), but the search endpoints
+themselves don't touch Stripe at all -- Stripe only lives in that one HTTP handler, not
+in the underlying credit/key data model. To test `/v1/search` or the `/v1/private/*`
+endpoints for real without any Stripe setup, create a key directly (same technique
+`tests/test_server.py` already uses):
+```python
+import db
+key = db.create_api_key("you@example.com")
+db.add_credits(db.hash_key(key), 5000, "sess_manual_test", 0)
+```
+Verified for real this way: shared-index search, and a full private-index cycle
+(`POST /v1/private/index` against a real GitHub repo -- real clone, real embed, real
+chunk count -- followed by `POST /v1/private/search` returning genuinely relevant
+results). Both matched exactly between raw `curl` and a client library's own request
+function, confirming the actual request/response contract works end-to-end, not just
+that it reads correctly on paper.
+
 ## API shape
 
 ```
@@ -99,6 +117,17 @@ POST /v1/private/search   Authorization: Bearer obs_...  {"query": "...", "k": 1
     default 2000) and isn't refunded if the indexing job itself fails
     partway (a bad git_url is caught before charging; a crash mid-embed
     is not refunded) -- disclosed, not hidden.
+- **Real coverage gaps found by using OBSERVE to shake down its own codebase, since
+  fixed** -- see [`FINDING_concept_shakedown.md`](FINDING_concept_shakedown.md) for the
+  full before/after. `/v1/private/search` was real, working, confirmed-executed code
+  that left **zero trace** in `usage_log` (`db.log_usage()` was only ever called from
+  the shared `/v1/search` handler) -- now wired in, verified against the real live
+  server and database, not just a test. `/v1/private/index`, `/v1/private/status`,
+  `/v1/private/search`, and `/v1/webhook/stripe` had zero automated test coverage --
+  now 7 real tests cover all four. All 12 previously-unverified env vars (everything
+  beyond `OBSERVE_INDEX_DIR`/`STRIPE_SECRET_KEY`) now have a test that sets a real
+  override and checks the actual resulting behavior changed, not just that a constant
+  holds the new value. Test suite: 38 passing, up from 21.
 - Per-key rate limiting (`rate_limit.py`, in-memory token bucket) now caps
   request RATE separately from the credit system's cost cap -- verified
   with a real 20-request concurrent burst (17 succeeded, 3 correctly got
@@ -115,6 +144,56 @@ POST /v1/private/search   Authorization: Bearer obs_...  {"query": "...", "k": 1
   wasn't worth paying. Ternary quantization remains the right call for the
   desktop tool (a user's own local disk is a real constraint there); it
   wasn't re-verified as worthwhile for a server you control.
+- **Hybrid search (dense embedding + BM25 lexical) is now live by default**
+  in `search_engine.py`'s `search()` (`hybrid=True` param, on unless you pass
+  `hybrid=False`) -- reached this after trying two other approaches and
+  measuring both as net negative first, not guessed at:
+  - Tried AST/function-boundary chunking (`ast_chunker.py`,
+    `_benchmark_ast_chunking.py`) as a real replacement for the fixed-window
+    chunking `build_index()` actually does (despite this project's own
+    earlier docs claiming "function-boundary chunking" -- a real,
+    now-corrected gap between documentation and implementation). Measured
+    net negative on the same 20-query/15-repo benchmark: 1 clear win, 5
+    regressions, 14 ties. Root cause: whole-function chunking nearly halves
+    the real-code chunk count, so the SAME markdown/changelog chunks (still
+    fixed-window, untouched by AST chunking) become a larger share of the
+    candidate pool and started outranking legitimate code more often than
+    the reverse. Not shipped.
+  - Tried naive full-corpus dense+BM25 fusion via Reciprocal Rank Fusion
+    (`_benchmark_hybrid_search.py`) -- also net negative (3 wins / 6
+    regressions / 11 ties), for two distinct reasons: (a) BM25 has no
+    notion of "wrong repo," so a shared word alone pulled in an unrelated
+    file from a different project/language entirely (an artifact of this
+    benchmark's 15-repos-in-one-index corpus specifically, not of
+    OBSERVE's real per-tenant indexes, but a real risk in a shared/multi-
+    project index); (b) BM25's term-frequency scoring favored verbose
+    test/doc files that repeat a query word many times over terse, CORRECT
+    implementation files that state it once -- lost flask's `scaffold.py`
+    and svelte's `reactivity/set.js` (the actually-right answers) this way.
+    Not shipped.
+  - **What IS shipped**: retrieve-then-rerank (`_benchmark_hybrid_rerank.py`,
+    now `SearchEngine._hybrid_rerank`) -- take the dense embedding's own
+    top-30 candidates, then re-rank ONLY those with a dense-dominant
+    weighted blend (0.7 dense / 0.3 BM25, both min-max normalized within
+    the pool). This structurally can't introduce a candidate dense didn't
+    already consider plausible, so it fixed both of naive fusion's failure
+    modes: `flask`/`scaffold.py` and `svelte`/`reactivity/set.js` came back
+    exactly right, and the wrong-language contamination case (an Express
+    query pulling in a Go file) disappeared. Real, measured, disclosed
+    tradeoff: it can't reach a correct answer dense missed entirely, so 2 of
+    naive fusion's 3 genuine wins (a Django ORM query, a Vue reactivity
+    query) are lost too -- safety over reach, a deliberate choice given the
+    failure modes it avoids were the more damaging kind. One real
+    regression remains even with this approach: a `redis` "expire a key"
+    query still surfaces Django's own `redis.py` cache backend ahead of
+    the real `expire.c`, because dense similarity itself (not BM25) ranked
+    that wrong-repo file inside its own top-30 -- reranking can't fix a
+    mistake dense already made upstream of it. Verified end-to-end against
+    the real, deployed index (`_verify_hybrid_wiring.py`), not just the
+    standalone benchmark script -- `SearchEngine.load()` now builds a BM25
+    index automatically (via the new `rank-bm25` dependency), and any
+    failure to do so (missing package, unreadable file) degrades silently
+    to the previously-proven dense-only path rather than breaking search.
 - Only benchmarked against plain grep (see `launch/show-hn.md`), not
   against other semantic/embedding-based code search tools (GitHub code
   search, Sourcegraph, or a vanilla embedding+vector-DB pipeline) -- those

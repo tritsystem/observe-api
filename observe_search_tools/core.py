@@ -48,6 +48,44 @@ def search(query: str, k: int = 10, repo: Optional[str] = None, api_key: Optiona
     return "\n".join(lines)
 
 
+def private_search(query: str, k: int = 10, api_key: Optional[str] = None) -> str:
+    """Calls POST /v1/private/search -- the caller's OWN indexed repo, not
+    the shared curated corpus search() hits. Requires a private index
+    already built for this key via POST /v1/private/index (see
+    tenant_index.py); this function only searches, it doesn't index."""
+    key = api_key or os.environ.get("OBSERVE_API_KEY")
+    if not key:
+        return "Error: no API key. Pass api_key= or set OBSERVE_API_KEY."
+
+    try:
+        resp = httpx.post(
+            f"{API_BASE}/v1/private/search",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"query": query, "k": k},
+            timeout=30,
+        )
+    except httpx.RequestError as e:
+        return f"Error: could not reach {API_BASE}: {e}"
+
+    if resp.status_code == 404:
+        return "Error: no ready private index for this key. POST /v1/private/index first."
+    if resp.status_code == 402:
+        return "Error: insufficient credits. Buy more via the checkout_url from your original signup response."
+    if resp.status_code == 401:
+        return "Error: invalid API key."
+    if resp.status_code != 200:
+        return f"Error: API returned {resp.status_code}: {resp.text}"
+
+    data = resp.json()
+    if not data["results"]:
+        return f"No results found. ({data['credits_remaining']} credits remaining.)"
+
+    lines = [f"{len(data['results'])} result(s), {data['credits_remaining']} credits remaining:\n"]
+    for r in data["results"]:
+        lines.append(f"{r['path']} (score {r['score']:.3f})\n  {r['preview']}\n")
+    return "\n".join(lines)
+
+
 TOOL_DESCRIPTION = (
     "Semantic code search over a curated set of popular open source repos "
     "(React, Django, NumPy, FastAPI, Tokio, and more). Use this when you can "

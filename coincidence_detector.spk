@@ -1,0 +1,28 @@
+# Coincidence detector -- two source neurons, one downstream neuron that
+# only fires when BOTH sources contribute within the same short window.
+#
+# concept_a and concept_b each drive `coincidence` with a weight (0.6)
+# too small to cross its threshold (50) alone: one real event from
+# either source alone contributes 0.6*50=30, well under 50. Only when
+# BOTH fire within the same window (before an explicit tick() decays
+# the accumulated input -- see spiking_coincidence_detector.py) do the
+# two 30-unit contributions sum to 60 and cross threshold. This checks a
+# real claim some concept pairs make implicitly -- "these two always
+# happen together" (a permission check paired with a feature-flag
+# check, a cache-write paired with a cache-invalidation) -- against real
+# per-window evidence, rather than a hand-written boolean AND.
+#
+# coincidence's own leak=40 is high on purpose: a single stray
+# contribution (30) decays back near 0 after one real tick() between
+# windows (see spiking_coincidence_detector.py's window loop), so a lone
+# signal from a PRIOR window can't accidentally combine with a new
+# signal from the NEXT window and register as a false coincidence.
+
+neuron concept_a threshold=50 leak=5
+neuron concept_b threshold=50 leak=5
+neuron coincidence threshold=50 leak=40
+
+connect concept_a -> coincidence weight=0.6
+connect concept_b -> coincidence weight=0.6
+
+refractory=0ms

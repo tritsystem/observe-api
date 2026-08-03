@@ -6,3 +6,4 @@ sentence-transformers>=2.6
 faiss-cpu>=1.8
 torch>=2.2
 numpy>=1.26
+rank-bm25>=0.2

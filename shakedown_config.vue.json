@@ -1,0 +1,22 @@
+{
+  "repo": {
+    "path": "G:/dev/observe-api/repos/vue",
+    "extra_skip_dirs": ["packages-private"],
+    "extensions": [".ts"]
+  },
+  "concepts": [
+    {"type": "build_flag", "pattern": "\\b(__[A-Z_]+__)\\b", "name_group": 1},
+    {"type": "env_var", "pattern": "process\\.env\\.([A-Z_][A-Z0-9_]*)", "name_group": 1}
+  ],
+  "evidence": {
+    "rules": {
+      "build_flag": [
+        {"kind": "file_grep", "glob": "packages/**/__tests__/**/*.ts"}
+      ],
+      "env_var": [
+        {"kind": "file_grep", "glob": "packages/**/__tests__/**/*.ts"},
+        {"kind": "file_grep", "glob": "scripts/**/*.ts"}
+      ]
+    }
+  }
+}

@@ -1,0 +1,30 @@
+# Periodic-schedule verifier -- one Resonator neuron.
+#
+# A Resonator is a damped harmonic oscillator (Spikeling's frequency-
+# selective neuron type, see core/runtime/runtime.py's ResonatorState).
+# Tuned here to freq=1 "cycle" in NORMALIZED time (one unit = one claimed
+# period, e.g. one day if the claim is "runs daily" -- see
+# spiking_schedule_resonator.py for the real-seconds -> cycles mapping).
+#
+# Real evidence timestamps are turned into short drive bursts. If they
+# land at a consistent phase every cycle (genuinely on schedule), the
+# oscillator builds up amplitude coherently over many cycles the same
+# way a lightly-damped bell rings up when struck in time with its own
+# resonance. If they're scattered (not actually periodic), the drive
+# lands at random phases each cycle, reinforcement is destructive on
+# average, and steady-state amplitude stays much lower.
+#
+# damping=0.01 (a high-Q, "rings for a while" resonator) was chosen
+# empirically: measured over 10 random seeds x 50 simulated cycles
+# (spiking_schedule_resonator.py's own validation), genuinely-periodic
+# input reached ~5-8x the steady-state RMS amplitude of random input at
+# the same average event rate, separated cleanly by threshold=0.15 in
+# 9/10 seeds (1 false-positive on random input, disclosed, not hidden).
+# This needs MANY real cycles (validated at 50; unreliable with only a
+# handful of observations) -- see the module docstring for that caveat.
+
+neuron schedule type=Resonator freq=1.0 damping=0.01 coupling=3.0
+
+action schedule -> [ON_SCHEDULE]
+
+refractory=0ms

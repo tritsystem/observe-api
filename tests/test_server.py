@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import stripe
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -106,6 +107,56 @@ def test_search_succeeds_and_deducts_exactly_one_credit(client, fresh_db):
     assert body["results"][0]["path"] == "lib/retry.js"
 
 
+def test_search_logs_usage(client, fresh_db):
+    # Regression test for a real bug: private_search() (below) was found,
+    # by actually running it against a live server, to charge a credit and
+    # return real results while never once calling db.log_usage -- silently
+    # undercounting real API activity in the exact table meant to track it.
+    # This test (shared search, which already worked) plus the private one
+    # below make sure the fix holds and can't regress unnoticed again.
+    api_key = _signup_and_fund(client, fresh_db, credits=5)
+    client.post(
+        "/v1/search",
+        json={"query": "retry logic for a failed upload"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    key_hash = fresh_db.hash_key(api_key)
+    with fresh_db.get_conn() as conn:
+        rows = conn.execute(
+            "SELECT query, repo_filter FROM usage_log WHERE key_hash = ?", (key_hash,)
+        ).fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == "retry logic for a failed upload"
+
+
+def test_private_search_succeeds_and_logs_usage(client, fresh_db, monkeypatch):
+    monkeypatch.setattr(server.tenant_index, "get_status", lambda key_hash: {"state": "ready"})
+    monkeypatch.setattr(
+        server.tenant_index.manager, "search",
+        lambda key_hash, query, k=10: [
+            {"score": 0.87, "path": "src/thing.py", "preview": "def thing(): ...", "offset": 0},
+        ],
+    )
+    api_key = _signup_and_fund(client, fresh_db, credits=2005)
+    resp = client.post(
+        "/v1/private/search",
+        json={"query": "where is thing defined"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["results"][0]["path"] == "src/thing.py"
+
+    key_hash = fresh_db.hash_key(api_key)
+    with fresh_db.get_conn() as conn:
+        rows = conn.execute(
+            "SELECT query, repo_filter FROM usage_log WHERE key_hash = ?", (key_hash,)
+        ).fetchall()
+    assert len(rows) == 1, "private_search() must call db.log_usage() same as shared search does"
+    assert rows[0][0] == "where is thing defined"
+    assert rows[0][1] == "__private__"
+
+
 def test_search_with_unknown_repo_is_400_and_does_not_charge(client, fresh_db):
     api_key = _signup_and_fund(client, fresh_db, credits=5)
     resp = client.post(
@@ -171,3 +222,112 @@ def test_repos_endpoint_lists_the_registry(client):
     resp = client.get("/v1/repos")
     assert resp.status_code == 200
     assert resp.json()["repos"] == ["axios"]
+
+
+# ------------------------------------------------------------------
+# /v1/private/index, /v1/private/status, /v1/webhook/stripe -- previously
+# had ZERO automated coverage (see FINDING_concept_shakedown.md): the only
+# evidence any of these worked was manual, real-session curl calls, not
+# anything that runs in CI. The real clone+embed itself isn't re-tested
+# here (too slow/network-dependent for a unit test, and search_engine.py's
+# own build_index has its own coverage) -- these test the HTTP endpoint's
+# OWN logic: validation, credit charging, and status-conflict handling,
+# same boundary the existing search tests already draw around engine.search.
+# ------------------------------------------------------------------
+
+def test_private_index_starts_indexing_and_deducts_credits(client, fresh_db, monkeypatch):
+    calls = []
+    monkeypatch.setattr(server.tenant_index, "get_status", lambda key_hash: {"state": "none"})
+    monkeypatch.setattr(server.tenant_index.manager, "start_indexing",
+                         lambda key_hash, git_url: calls.append((key_hash, git_url)))
+
+    api_key = _signup_and_fund(client, fresh_db, credits=server.CREDITS_PER_PRIVATE_INDEX + 5)
+    resp = client.post(
+        "/v1/private/index",
+        json={"git_url": "https://github.com/octocat/Hello-World"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "indexing"
+    assert body["credits_remaining"] == 5
+    assert len(calls) == 1 and calls[0][1] == "https://github.com/octocat/Hello-World"
+
+
+def test_private_index_rejects_invalid_git_url_and_does_not_charge(client, fresh_db):
+    # Real, unmocked validate_git_url() -- not a canned response.
+    api_key = _signup_and_fund(client, fresh_db, credits=server.CREDITS_PER_PRIVATE_INDEX + 5)
+    resp = client.post(
+        "/v1/private/index",
+        json={"git_url": "not-a-real-url"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 400
+    assert fresh_db.get_key_record(api_key)["credits"] == server.CREDITS_PER_PRIVATE_INDEX + 5
+
+
+def test_private_index_returns_409_when_already_indexing(client, fresh_db, monkeypatch):
+    monkeypatch.setattr(server.tenant_index, "get_status", lambda key_hash: {"state": "indexing"})
+    api_key = _signup_and_fund(client, fresh_db, credits=server.CREDITS_PER_PRIVATE_INDEX + 5)
+    resp = client.post(
+        "/v1/private/index",
+        json={"git_url": "https://github.com/octocat/Hello-World"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 409
+    # The 409 check happens before charging -- must not have been billed.
+    assert fresh_db.get_key_record(api_key)["credits"] == server.CREDITS_PER_PRIVATE_INDEX + 5
+
+
+def test_private_status_returns_current_state(client, fresh_db, monkeypatch):
+    monkeypatch.setattr(server.tenant_index, "get_status",
+                         lambda key_hash: {"state": "ready", "chunks": 324})
+    api_key = _signup_and_fund(client, fresh_db, credits=1)
+    resp = client.get("/v1/private/status", headers={"Authorization": f"Bearer {api_key}"})
+    assert resp.status_code == 200
+    assert resp.json() == {"state": "ready", "chunks": 324}
+
+
+def test_private_status_requires_auth(client):
+    resp = client.get("/v1/private/status")
+    assert resp.status_code == 401
+
+
+def test_webhook_processes_checkout_completed_and_adds_credits(client, fresh_db, monkeypatch):
+    api_key = _signup_and_fund(client, fresh_db, credits=0)
+    key_hash = fresh_db.hash_key(api_key)
+
+    monkeypatch.setattr(billing, "WEBHOOK_SECRET", "whsec_test")
+    canned_event = {
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "id": "cs_test_real_shape",
+            "metadata": {"key_hash": key_hash, "credits": "50000"},
+            "amount_total": 500,
+        }},
+    }
+    monkeypatch.setattr(stripe.Webhook, "construct_event", lambda payload, sig, secret: canned_event)
+
+    resp = client.post(
+        "/v1/webhook/stripe",
+        content=b'{"fake": "payload"}',
+        headers={"Stripe-Signature": "t=1,v1=fake"},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"received": True}
+    assert fresh_db.get_key_record(api_key)["credits"] == 50000
+
+
+def test_webhook_rejects_invalid_signature(client, fresh_db, monkeypatch):
+    monkeypatch.setattr(billing, "WEBHOOK_SECRET", "whsec_test")
+
+    def _raise(payload, sig, secret):
+        raise stripe.error.SignatureVerificationError("bad sig", sig)
+    monkeypatch.setattr(stripe.Webhook, "construct_event", _raise)
+
+    resp = client.post(
+        "/v1/webhook/stripe",
+        content=b'{"fake": "payload"}',
+        headers={"Stripe-Signature": "t=1,v1=wrong"},
+    )
+    assert resp.status_code == 400

@@ -1,0 +1,21 @@
+{
+  "repo": {
+    "path": "G:/dev/observe-api/repos/django",
+    "extra_skip_dirs": [],
+    "extensions": [".py"]
+  },
+  "concepts": [
+    {"type": "env_var", "pattern": "os\\.environ\\.get\\([\"']([A-Z_][A-Z0-9_]*)[\"']", "name_group": 1},
+    {"type": "settings_attr", "pattern": "settings\\.([A-Z_][A-Z0-9_]*)", "name_group": 1}
+  ],
+  "evidence": {
+    "rules": {
+      "env_var": [
+        {"kind": "file_grep", "glob": "tests/**/*.py"}
+      ],
+      "settings_attr": [
+        {"kind": "file_grep", "glob": "tests/**/*.py"}
+      ]
+    }
+  }
+}

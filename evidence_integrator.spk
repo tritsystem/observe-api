@@ -1,0 +1,16 @@
+# Multi-signal evidence integrator for Concept Shakedown.
+#
+# One LIF neuron. Each real evidence signal (a SQL match, a disk-glob hit,
+# a test-suite grep, a gateway-log line, an HTTP flag-service hit) drives
+# it with a weight reflecting how directly that signal implies real
+# execution -- see spiking_evidence.py's DEFAULT_WEIGHTS. Zero drive for
+# a False/unknown signal, so it just leaks back toward rest between real
+# hits. threshold=65 means one strong signal (an HTTP hit, weight 70)
+# fires alone, but two moderate signals (e.g. a test-grep hit at 40 plus
+# a disk-glob hit at 30, minus a little leak between them) can also
+# combine to cross it -- real graded integration instead of a crude
+# any-signal-true OR.
+
+neuron evidence threshold=65 leak=5 type=LIF
+
+refractory=0ms

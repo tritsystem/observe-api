@@ -1,0 +1,22 @@
+{
+  "repo": {
+    "path": "C:/Users/gbran/OneDrive/Documents/l4d2-horde-shop-mod",
+    "extra_skip_dirs": ["toolchain"],
+    "extensions": [".sp", ".md"]
+  },
+  "index_out_dir": "C:/Users/gbran/OneDrive/Documents/l4d2-horde-shop-mod/.shakedown-index",
+  "concepts": [
+    {"type": "command", "pattern": "RegConsoleCmd\\(\"(\\w+)\"", "name_group": 1},
+    {"type": "event_hook", "pattern": "HookEvent\\(\"(\\w+)\"", "name_group": 1}
+  ],
+  "evidence": {
+    "rules": {
+      "command": [
+        {"kind": "file_grep", "glob": "C:/L4D2Server/server/left4dead2/addons/sourcemod/logs/*.log"}
+      ],
+      "event_hook": [
+        {"kind": "file_grep", "glob": "C:/L4D2Server/server/left4dead2/addons/sourcemod/logs/*.log"}
+      ]
+    }
+  }
+}

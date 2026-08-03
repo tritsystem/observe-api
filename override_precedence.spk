@@ -1,0 +1,19 @@
+# Precedence/override checker -- two LIF neurons, one inhibitory synapse.
+#
+# Models a claimed precedence rule (a config override, a kill-switch, a
+# permission check that's supposed to suppress a lower-priority check)
+# as a real inhibitory synapse: when override_neuron fires, it DRAINS
+# base_neuron's membrane potential (negative weight = inhibition, see
+# core/runtime/runtime.py's _fire() propagation) instead of adding to it.
+# A base_neuron driven by normal-strength evidence right after a real
+# override firing should NOT cross its own threshold -- if it does
+# anyway, that's real evidence the code's claimed precedence doesn't
+# actually hold in practice. See spiking_override_precedence.py for how
+# real per-observation evidence pairs drive this network.
+
+neuron override_neuron threshold=50 leak=5
+neuron base_neuron     threshold=50 leak=5
+
+connect override_neuron -> base_neuron weight=-1.0
+
+refractory=0ms
