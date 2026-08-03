@@ -42,6 +42,8 @@ from pathlib import Path
 
 import numpy as np
 
+from spiking_evidence import spiking_verdict
+
 
 def log(msg):
     """Progress/status output goes to stderr, always -- real bug, caught
@@ -398,7 +400,18 @@ def evaluate_concept(repo_path, concept, evidence_config):
     else:
         verdict = "NO EVIDENCE (checked, found nothing)"
 
-    return {"verdict": verdict, "signals": signals}
+    # Spiking cross-check (spiking_evidence.py): the classic verdict above is
+    # boolean OR -- ANY true signal confirms, regardless of how weak. The
+    # spiking verdict runs the SAME signals through a real weighted LIF
+    # integrator, so several individually-weak signals can combine into a
+    # confirmation the OR-based verdict would also reach anyway, OR it can
+    # reveal a case where OR confirms on one thin, low-weight signal (e.g. a
+    # bare disk_glob hit) that the weighted integrator alone wouldn't have
+    # trusted -- worth surfacing, not silently discarding either verdict.
+    spiking, spiking_trace = spiking_verdict(signals)
+
+    return {"verdict": verdict, "signals": signals,
+            "spiking_verdict": spiking, "spiking_trace": spiking_trace}
 
 
 def main():
