@@ -453,7 +453,7 @@ class SearchEngine:
                 on_done()
         threading.Thread(target=_build, daemon=True).start()
 
-    def load_blocking(self, index_dir, model_path, timeout=180):
+    def load_blocking(self, index_dir, model_path, timeout=900):
         """Synchronous wrapper around load() for server startup -- blocks
         until self.ready or timeout. The class's own load()/build_index()
         are thread-based (built for a GUI event loop that can't block), but
