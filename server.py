@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, EmailStr
 
 import billing
@@ -34,6 +35,8 @@ CREDITS_PER_PRIVATE_INDEX = int(os.environ.get("OBSERVE_CREDITS_PER_PRIVATE_INDE
 # repeated signups; kept small deliberately for that reason, not an oversight.
 SIGNUP_BONUS_CREDITS = int(os.environ.get("OBSERVE_SIGNUP_BONUS_CREDITS", "100"))
 
+_LANDING_PAGE_PATH = os.path.join(os.path.dirname(__file__), "landing", "index.html")
+
 engine = SearchEngine()
 
 
@@ -48,6 +51,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="OBSERVE Search API", version="1.0.0", lifespan=lifespan)
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def landing_page():
+    # Read from disk on every request (not cached at import time) -- the
+    # page is a handful of KB, and this lets it be edited/redeployed without
+    # a server restart, same reasoning as _RepoRegistry.get() below.
+    with open(_LANDING_PAGE_PATH) as f:
+        return f.read()
 
 
 def _require_key(authorization: Optional[str]) -> str:
