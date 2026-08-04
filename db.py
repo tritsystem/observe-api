@@ -66,14 +66,17 @@ def init_db():
         """)
 
 
-def create_api_key(email: str) -> str:
+def create_api_key(email: str, initial_credits: int = 0) -> str:
     """Creates a new key, returns the RAW key (only ever returned once --
-    caller must save it, we only ever store the hash from here on)."""
+    caller must save it, we only ever store the hash from here on).
+    initial_credits seeds the signup free-trial balance (see
+    server.py's SIGNUP_BONUS_CREDITS) -- defaults to 0 for any other
+    caller that doesn't want a bonus applied."""
     raw_key = "obs_" + secrets.token_urlsafe(32)
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO api_keys (key_hash, email, credits, created_at) VALUES (?, ?, 0, ?)",
-            (_hash_key(raw_key), email, time.time()),
+            "INSERT INTO api_keys (key_hash, email, credits, created_at) VALUES (?, ?, ?, ?)",
+            (_hash_key(raw_key), email, initial_credits, time.time()),
         )
     return raw_key
 
