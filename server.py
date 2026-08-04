@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, EmailStr
 
 import billing
@@ -46,7 +46,12 @@ async def lifespan(app: FastAPI):
     db.init_db()
     # Blocking on purpose -- the process shouldn't accept traffic before the
     # model + index are actually loaded and ready to serve real results.
-    status = engine.load_blocking(INDEX_DIR, MODEL_PATH)
+    # Timeout configurable since load time scales with corpus size (759k
+    # chunks now vs. whatever this was originally tuned against) and with
+    # whatever else is competing for CPU/GPU on the host at startup time --
+    # the 180s default undershot both of those in practice.
+    load_timeout = int(os.environ.get("OBSERVE_LOAD_TIMEOUT_SECONDS", "900"))
+    status = engine.load_blocking(INDEX_DIR, MODEL_PATH, timeout=load_timeout)
     print(f"[startup] engine ready: {status}")
     yield
 
@@ -83,6 +88,13 @@ def privacy_page():
 def refund_policy_page():
     with open(os.path.join(_LEGAL_DIR, "refund-policy.html")) as f:
         return f.read()
+
+
+# Required (non-conditionally) by Stripe's product feed spec: a resolvable
+# image_link, >= 800x800px JPEG/PNG. See legal/product-image.png.
+@app.get("/product-image.png", include_in_schema=False)
+def product_image():
+    return FileResponse(os.path.join(_LEGAL_DIR, "product-image.png"), media_type="image/png")
 
 
 def _require_key(authorization: Optional[str]) -> str:
