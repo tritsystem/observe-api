@@ -36,6 +36,7 @@ CREDITS_PER_PRIVATE_INDEX = int(os.environ.get("OBSERVE_CREDITS_PER_PRIVATE_INDE
 SIGNUP_BONUS_CREDITS = int(os.environ.get("OBSERVE_SIGNUP_BONUS_CREDITS", "100"))
 
 _LANDING_PAGE_PATH = os.path.join(os.path.dirname(__file__), "landing", "index.html")
+_LEGAL_DIR = os.path.join(os.path.dirname(__file__), "legal")
 
 engine = SearchEngine()
 
@@ -59,6 +60,28 @@ def landing_page():
     # page is a handful of KB, and this lets it be edited/redeployed without
     # a server restart, same reasoning as _RepoRegistry.get() below.
     with open(_LANDING_PAGE_PATH) as f:
+        return f.read()
+
+
+# Stripe's account activation flow requires these three URLs to actually
+# resolve (Terms of service, Privacy policy, Refund and return policy) --
+# not placeholders. Same "read from disk every request" reasoning as the
+# landing page above.
+@app.get("/terms", response_class=HTMLResponse, include_in_schema=False)
+def terms_page():
+    with open(os.path.join(_LEGAL_DIR, "terms.html")) as f:
+        return f.read()
+
+
+@app.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
+def privacy_page():
+    with open(os.path.join(_LEGAL_DIR, "privacy.html")) as f:
+        return f.read()
+
+
+@app.get("/refund-policy", response_class=HTMLResponse, include_in_schema=False)
+def refund_policy_page():
+    with open(os.path.join(_LEGAL_DIR, "refund-policy.html")) as f:
         return f.read()
 
 
