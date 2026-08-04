@@ -386,13 +386,13 @@
         <tbody>
           <tr>
             <td>Accuracy, real OSS code</td>
-            <td class="mono stat">92% <span class="stat-sub">vs. 76.7% stock baseline</span></td>
-            <td class="stat-sub">OBSERVE engine, fine-tuned retrieval model</td>
+            <td class="mono stat">76.7%</td>
+            <td class="stat-sub">Stock all-MiniLM-L6-v2 — what this API actually runs</td>
           </tr>
           <tr>
             <td>Accuracy, hard benchmark</td>
-            <td class="mono stat">96% <span class="stat-sub">vs. 92% stock baseline</span></td>
-            <td class="stat-sub">Curated adversarial query set</td>
+            <td class="mono stat">92%</td>
+            <td class="stat-sub">Curated adversarial query set, same stock model</td>
           </tr>
           <tr>
             <td>Token cost vs. plain search</td>
@@ -401,22 +401,22 @@
           </tr>
           <tr>
             <td>Index footprint</td>
-            <td class="mono stat">19.9× smaller</td>
-            <td class="stat-sub">Ternary bit-packing — 5 trits per byte — vs. float32</td>
+            <td class="mono stat">1.17GB <span class="stat-sub">full float32</span></td>
+            <td class="stat-sub">759k chunks, 29 repos — not quantized (see note)</td>
           </tr>
         </tbody>
       </table>
     </div>
     <p class="note">
-      These figures are the underlying OBSERVE engine's own general
-      benchmarks. This hosted deployment specifically runs the <strong>stock</strong>
-      all-MiniLM-L6-v2 model, not the fine-tuned one above — a fine-tuning
-      attempt was measured against it here and came out worse on real
-      retrieval, so it wasn't shipped. The index is also served at
-      <strong>full float32 precision</strong>, not ternary-quantized —
-      quantization measured a 40% top-1 flip rate on this corpus, not worth
-      the size savings at this scale. Reporting this so the numbers above
-      aren't mistaken for a claim about this specific deployment.
+      These are the numbers for what's actually deployed, not a best-case
+      variant. Two upgrades were tried and specifically rejected after
+      measuring worse on real retrieval: a fine-tuned version of the model
+      (92%/96% on the rows above, but that's after real bug fixes to the
+      training pipeline, not a first attempt gone wrong — it still measured
+      worse than stock) and ternary-quantizing the index (19.9× smaller, but
+      a 40% top-1 flip rate on this corpus). Both are real, working
+      capabilities of the underlying OBSERVE engine; neither made search
+      results better here, so neither shipped.
     </p>
   </div>
 </section>
