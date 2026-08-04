@@ -243,7 +243,12 @@ class SearchEngine:
                 return sims[top], top
 
             cand_dense = sims[candidates]
-            cand_bm25 = np.asarray(self.bm25.get_scores(_tokenize(query)))[candidates]
+            # get_batch_scores scores only `candidates` (len == HYBRID_N_CANDIDATES,
+            # e.g. 30) instead of get_scores' full-corpus scan (759k+ docs) --
+            # the full-corpus scores were computed and then immediately
+            # discarded down to these same 30 anyway. This was the dominant
+            # cost in every search (~3s/query measured, corpus-size-scaling).
+            cand_bm25 = np.asarray(self.bm25.get_batch_scores(_tokenize(query), candidates.tolist()))
 
             d_min, d_max = cand_dense.min(), cand_dense.max()
             b_min, b_max = cand_bm25.min(), cand_bm25.max()
