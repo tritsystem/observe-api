@@ -111,6 +111,12 @@ class SearchRequest(BaseModel):
     query: str
     k: int = 10
     repo: Optional[str] = None  # optional: scope to one indexed repo's base_dir
+    # Reframes results as unverified candidates instead of ranked answers --
+    # a semantic match is correlation with the query, not proof a given
+    # location causes whatever behavior the agent is actually investigating
+    # (root-causing a bug, explaining a regression, etc.). Template-only in
+    # v1 (no LLM call, no added cost) -- see verification_hint below.
+    investigate: bool = False
 
 
 class SearchResult(BaseModel):
@@ -118,11 +124,13 @@ class SearchResult(BaseModel):
     path: str
     preview: str
     repo: Optional[str] = None
+    verification_hint: Optional[str] = None
 
 
 class SearchResponse(BaseModel):
     results: list[SearchResult]
     credits_remaining: int
+    note: Optional[str] = None
 
 
 @app.post("/v1/search", response_model=SearchResponse)
@@ -168,10 +176,30 @@ def search(req: SearchRequest, authorization: Optional[str] = Header(None)):
     record = db.get_key_record(raw_key)
     return SearchResponse(
         results=[
-            SearchResult(score=r["score"], path=r["path"], preview=r["preview"], repo=req.repo)
+            SearchResult(
+                score=r["score"],
+                path=r["path"],
+                preview=r["preview"],
+                repo=req.repo,
+                verification_hint=_verification_hint(r["path"]) if req.investigate else None,
+            )
             for r in raw_results
         ],
         credits_remaining=record["credits"],
+        note=(
+            "investigate mode: results below are unverified candidates ranked by semantic "
+            "similarity to your query, not confirmed causes. Each has a suggested falsification "
+            "test -- run it before treating a candidate as the actual cause."
+        ) if req.investigate else None,
+    )
+
+
+def _verification_hint(path: str) -> str:
+    return (
+        f"Unverified candidate -- {path} matched semantically but hasn't been tested as the "
+        f"actual cause. Before treating it as the cause: isolate {path} (stub it out, disable "
+        f"it, or add instrumentation around it) and re-run the behavior you're investigating "
+        f"to see whether it persists without this code path."
     )
 
 
