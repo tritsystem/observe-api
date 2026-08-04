@@ -1,5 +1,5 @@
 {$DOMAIN} {
-	reverse_proxy api:8000
+	reverse_proxy host.docker.internal:8000
 
 	encode gzip
 
