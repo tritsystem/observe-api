@@ -5,6 +5,7 @@ services:
     env_file: .env
     volumes:
       - observe_data:/data
+      - /root/observe-repos-data:/home/gbran/observe-api/data/repos:ro
     expose:
       - "8000"
 
