@@ -1,0 +1,47 @@
+<title>Privacy Policy — OBSERVE Search API</title>
+<style>
+  body { max-width: 720px; margin: 60px auto; padding: 0 24px; font-family: Georgia, serif; line-height: 1.6; color: #1c1e1a; background: #f1efe7; }
+  @media (prefers-color-scheme: dark) { body { background: #15181a; color: #e8e6de; } a { color: #6fab9e; } }
+  h1 { font-size: 1.8rem; } h2 { font-size: 1.2rem; margin-top: 2em; }
+  a { color: #3e7269; }
+</style>
+
+<h1>Privacy Policy</h1>
+<p><em>Last updated: August 2026</em></p>
+
+<p>This describes what data OBSERVE Search API ("the Service") collects and
+how it's used. The Service is built for machine-to-machine use (API keys,
+not user accounts with profiles), so what's collected is deliberately
+minimal.</p>
+
+<h2>What's collected</h2>
+<ul>
+  <li><strong>Email address</strong> — collected at signup, used only to
+  create your Stripe Checkout session and, if you contact us, to respond.
+  Your API key is stored only as a one-way hash, not in reverse-recoverable
+  form.</li>
+  <li><strong>Search queries and usage</strong> — the text of queries you
+  send, which repo (if any) was searched, and result counts are logged
+  against your key's hash, to enforce credit balances and for debugging.</li>
+  <li><strong>Payment information</strong> — handled entirely by Stripe;
+  this Service never receives or stores your card details. See
+  <a href="https://stripe.com/privacy" target="_blank" rel="noopener">Stripe's privacy policy</a>.</li>
+  <li><strong>Private repository content</strong> — if you use
+  <code>/v1/private/index</code>, the repository you point at is cloned and
+  embedded to build your private search index. It is not shared with other
+  API keys.</li>
+</ul>
+
+<h2>What's not collected</h2>
+<p>No advertising trackers, no third-party analytics beyond what's needed to
+operate the API and process payment (Stripe), no sale of data to third
+parties.</p>
+
+<h2>Data retention</h2>
+<p>Usage logs are retained to support billing accuracy and abuse
+investigation. You can request deletion of your account's data by
+contacting the address on the <a href="/">homepage</a>.</p>
+
+<h2>Changes</h2>
+<p>This policy may be updated from time to time; the "last updated" date
+above reflects the most recent revision.</p>
