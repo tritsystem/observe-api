@@ -18,11 +18,22 @@ services:
     environment:
       - DOMAIN=${DOMAIN}
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      # host-gateway resolved to the wrong bridge (default "bridge" network's
+      # 172.17.0.1) instead of this compose network's actual gateway --
+      # pinning both the subnet below and this IP keeps them in sync across
+      # recreates instead of trusting Docker to guess the right one.
+      - "host.docker.internal:172.18.0.1"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16
+          gateway: 172.18.0.1
 
 volumes:
   observe_data:
