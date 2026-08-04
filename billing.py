@@ -9,7 +9,9 @@ Needs real Stripe keys to actually run (STRIPE_SECRET_KEY,
 STRIPE_WEBHOOK_SECRET) -- code-complete without them, but every call will
 fail until they're set as real environment variables.
 """
+import json
 import os
+import urllib.request
 
 import stripe
 
@@ -37,6 +39,53 @@ PACKAGE_CREDITS = int(os.environ.get("OBSERVE_PACKAGE_CREDITS", "50000"))
 
 SUCCESS_URL = os.environ.get("OBSERVE_CHECKOUT_SUCCESS_URL", "https://example.com/success")
 CANCEL_URL = os.environ.get("OBSERVE_CHECKOUT_CANCEL_URL", "https://example.com/cancel")
+
+# Reuses the same Discord bot identity/token already set up for the
+# Spikeling personal-assistant bot (see Documents/Spikeling/discord_bot.py)
+# -- same env var names on purpose, so one bot token covers both without
+# a second Discord application. This calls Discord's REST API directly
+# (stdlib urllib, no new dependency) rather than going through that bot's
+# live gateway client -- a sale notification is a one-shot DM, it doesn't
+# need an open gateway connection to send it.
+DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
+DISCORD_AUTHORIZED_USER_ID = os.environ.get("DISCORD_AUTHORIZED_USER_ID", "")
+
+
+def _notify_discord_sale(amount_cents: int, credits: int):
+    # Best-effort, never fatal -- a Discord outage or a missing token
+    # shouldn't stop a real payment from crediting the buyer's account.
+    if not DISCORD_BOT_TOKEN or not DISCORD_AUTHORIZED_USER_ID:
+        return
+    try:
+        headers = {
+            "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+            "Content-Type": "application/json",
+        }
+        # DM channels are opened by recipient_id, not addressed directly --
+        # same two-call pattern (open channel, then post to it) Discord's
+        # REST API requires for bot-initiated DMs.
+        open_req = urllib.request.Request(
+            "https://discord.com/api/v10/users/@me/channels",
+            data=json.dumps({"recipient_id": DISCORD_AUTHORIZED_USER_ID}).encode(),
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(open_req, timeout=10) as resp:
+            channel_id = json.load(resp)["id"]
+
+        text = (
+            f"cha-ching, bro -- real sale on observe-api: "
+            f"${amount_cents / 100:.2f} for {credits:,} credits."
+        )
+        send_req = urllib.request.Request(
+            f"https://discord.com/api/v10/channels/{channel_id}/messages",
+            data=json.dumps({"content": text}).encode(),
+            headers=headers,
+            method="POST",
+        )
+        urllib.request.urlopen(send_req, timeout=10).close()
+    except Exception as e:
+        print(f"(Discord sale notification failed, non-fatal: {e})", flush=True)
 
 
 def create_checkout_session(email: str, key_hash: str) -> str:
@@ -76,3 +125,4 @@ def handle_webhook(payload: bytes, sig_header: str | None):
         credits = int(session["metadata"]["credits"])
         amount_cents = session["amount_total"]
         db.add_credits(key_hash, credits, session["id"], amount_cents)
+        _notify_discord_sale(amount_cents, credits)
