@@ -28,6 +28,11 @@ CREDITS_PER_SEARCH = int(os.environ.get("OBSERVE_CREDITS_PER_SEARCH", "1"))
 # the per-search price. Not refunded on a failed index (e.g. bad git_url) --
 # a disclosed v1 simplification, not an oversight.
 CREDITS_PER_PRIVATE_INDEX = int(os.environ.get("OBSERVE_CREDITS_PER_PRIVATE_INDEX", "2000"))
+# Free trial credits granted at signup, before any payment -- lets a new
+# caller try a handful of real searches without hitting Stripe first. v1 has
+# no email verification (see db.create_api_key), so this is exploitable via
+# repeated signups; kept small deliberately for that reason, not an oversight.
+SIGNUP_BONUS_CREDITS = int(os.environ.get("OBSERVE_SIGNUP_BONUS_CREDITS", "100"))
 
 engine = SearchEngine()
 
@@ -240,13 +245,13 @@ class SignupResponse(BaseModel):
 
 @app.post("/v1/signup", response_model=SignupResponse)
 def signup(req: SignupRequest):
-    raw_key = db.create_api_key(req.email)
+    raw_key = db.create_api_key(req.email, initial_credits=SIGNUP_BONUS_CREDITS)
     checkout_url = billing.create_checkout_session(req.email, db.hash_key(raw_key))
     return SignupResponse(
         api_key=raw_key,
         checkout_url=checkout_url,
-        note="Save this API key now -- it is only ever shown once and is not recoverable. "
-             "Balance starts at 0 credits; complete checkout_url to fund it.",
+        note=f"Save this API key now -- it is only ever shown once and is not recoverable. "
+             f"Balance starts at {SIGNUP_BONUS_CREDITS} free trial credits; complete checkout_url to add more.",
     )
 
 
