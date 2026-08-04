@@ -231,11 +231,19 @@
   .stat { font-size: 1.05rem; }
   .stat-sub { color: var(--muted); font-size: 0.85rem; }
   .overflow-x { overflow-x: auto; }
+  .note {
+    font-size: 0.88rem;
+    color: var(--muted);
+    margin-top: 18px;
+    padding: 14px 16px;
+    border-left: 2px solid var(--accent);
+    background: var(--paper-raised);
+  }
 
   /* ---------- Repo catalog ---------- */
   .catalog {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
     gap: 1px;
     background: var(--line);
     border: 1px solid var(--line);
@@ -328,7 +336,8 @@
     <h1 class="display">Semantic code search,<br /><em>priced for machines.</em></h1>
     <p class="lede">
       Pay-per-query search over a curated set of real open source repositories —
-      React, Django, NumPy, Tokio, and a dozen more. An API key, a prepaid
+      React, Django, NumPy, Tokio, Rails, Spring Boot, and two dozen more, plus
+      on-demand indexing of any repo you point it at. An API key, a prepaid
       balance, and a single endpoint. No approval queue between "buy credits"
       and "start querying."
     </p>
@@ -378,7 +387,7 @@
           <tr>
             <td>Accuracy, real OSS code</td>
             <td class="mono stat">92% <span class="stat-sub">vs. 76.7% stock baseline</span></td>
-            <td class="stat-sub">Fine-tuned retrieval model vs. off-the-shelf embeddings</td>
+            <td class="stat-sub">OBSERVE engine, fine-tuned retrieval model</td>
           </tr>
           <tr>
             <td>Accuracy, hard benchmark</td>
@@ -398,19 +407,34 @@
         </tbody>
       </table>
     </div>
+    <p class="note">
+      These figures are the underlying OBSERVE engine's own general
+      benchmarks. This hosted deployment specifically runs the <strong>stock</strong>
+      all-MiniLM-L6-v2 model, not the fine-tuned one above — a fine-tuning
+      attempt was measured against it here and came out worse on real
+      retrieval, so it wasn't shipped. The index is also served at
+      <strong>full float32 precision</strong>, not ternary-quantized —
+      quantization measured a 40% top-1 flip rate on this corpus, not worth
+      the size savings at this scale. Reporting this so the numbers above
+      aren't mistaken for a claim about this specific deployment.
+    </p>
   </div>
 </section>
 
 <section id="repos">
   <div class="wrap">
     <p class="kicker">Currently indexed</p>
-    <h2 class="display">Fifteen repositories, refreshed from their default branch.</h2>
+    <h2 class="display">Twenty-nine repositories, refreshed from their default branch.</h2>
     <p class="body-copy">Call <span class="mono">GET /v1/repos</span> for the live list — this catalog grows independently of this page.</p>
     <div class="catalog">
       <span>react</span><span>django</span><span>flask</span><span>fastapi</span>
       <span>express</span><span>redis</span><span>numpy</span><span>pandas</span>
       <span>svelte</span><span>vue</span><span>axios</span><span>gin</span>
-      <span>cargo</span><span>tokio</span><span>laravel</span>
+      <span>cargo</span><span>tokio</span><span>laravel</span><span>rails</span>
+      <span>spring-boot</span><span>aspnetcore</span><span>nestjs</span><span>nextjs</span>
+      <span>symfony</span><span>phoenix</span><span>vapor</span><span>ktor</span>
+      <span>pytest</span><span>actix-web</span><span>scikit-learn</span><span>langchain</span>
+      <span>curl</span>
     </div>
   </div>
 </section>
@@ -434,6 +458,13 @@
       thousand tokens saved is worth a fraction of a cent — so the price
       per call is set to clearly undercut that, not to price the compute.
     </p>
+    <p class="body-copy">
+      New keys start with a small free trial balance, so you can run real
+      queries before buying credits. Indexing a repo of your own via
+      <span class="mono">/v1/private/index</span> costs substantially more
+      per repo than a single search — it's a real one-time compute cost
+      (cloning and embedding an entire codebase), not a marginal query.
+    </p>
   </div>
 </section>
 
@@ -443,11 +474,11 @@
     <h2 class="display">One endpoint, three ways to call it.</h2>
     <div class="terminal mono">
       <div class="line"><span class="comment"># 1. sign up — returns an API key and a checkout link</span></div>
-      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.dev/v1/signup \</div>
+      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.online/v1/signup \</div>
       <div class="line">    -d '{"email":"you@example.com"}'</div>
       <div class="line">&nbsp;</div>
       <div class="line"><span class="comment"># 2. search</span></div>
-      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.dev/v1/search \</div>
+      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.online/v1/search \</div>
       <div class="line">    -H "Authorization: Bearer obs_..." \</div>
       <div class="line">    -d '{"query":"retry logic for a failed upload","repo":"axios"}'</div>
     </div>
