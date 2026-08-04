@@ -89,6 +89,12 @@ POST /v1/private/search   Authorization: Bearer obs_...  {"query": "...", "k": 1
                            -> 404 if this key has no ready private index yet
 ```
 
+See [`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md) for how to actually wire
+this into an agent's toolset -- MCP/LangChain/CrewAI get the "when to call
+this vs. grep" motive for free from the tool description; a raw HTTP/custom
+agent integration needs that guidance written into its own system prompt,
+with a real example.
+
 ## investigate mode (experimental)
 
 `POST /v1/search` with `"investigate": true` reframes results as **unverified
