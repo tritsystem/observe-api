@@ -441,6 +441,25 @@ anywhere durable, since third-party pricing changes without notice.*
     index automatically (via the new `rank-bm25` dependency), and any
     failure to do so (missing package, unreadable file) degrades silently
     to the previously-proven dense-only path rather than breaking search.
+  - Tried a definition-vs-reference reranking boost (`_benchmark_definition_boost.py`),
+    the one piece of a real competitor's approach (Semble, `MinishLab/semble`
+    -- tree-sitter chunking + Model2Vec + BM25 fused via RRF, claims ~98%
+    fewer tokens than grep+read) not already covered by the two rejected
+    experiments above: within the existing top-30 dense candidates, a chunk
+    containing a `def`/`class`/`function` line whose name overlaps the
+    query's (camelCase + snake_case split) tokens gets an additive boost.
+    Also net negative on the same 20-query benchmark: 2 wins / 3 regressions
+    / 15 ties. The 2 wins were real (flask's actual `def route(...)`
+    promoted to rank 1; numpy's `_broadcast_shape` implementation promoted
+    over an `_add_newdocs.py` docstring file). All 3 regressions were the
+    same cross-repo contamination failure mode as the rejected RRF
+    experiment -- a shared token ("state", "key") matched a definition in a
+    completely unrelated repo/language. One of the three compounds the
+    already-known `redis`/Django-`redis.py` mistake noted above (dense
+    itself already ranked that wrong-repo file into its own top-30; the
+    boost just pushed it higher), rather than being a new failure mode.
+    Not shipped. A same-repo-only scoping constraint on the boost is the
+    obvious next iteration if this gets revisited, not attempted here.
 - Only benchmarked against plain grep (see `launch/show-hn.md`), not
   against other semantic/embedding-based code search tools (GitHub code
   search, Sourcegraph, or a vanilla embedding+vector-DB pipeline) -- those
