@@ -17,7 +17,11 @@ Usage:
     observe commerce-search "waterproof boots for a muddy trail"
     observe commerce-register-seller "Trailhead" "https://.../checkout_sessions"
     observe commerce-add-listings 1 '[{"item_id":"sku-1","name":"Boots","description":"..."}]'
-    observe commerce-feedback 1 sku-1 purchased
+    observe commerce-feedback 1 sku-1 purchased --match-id <from a search result>
+    observe commerce-seller-feedback <match_id> fulfilled --rating 5
+    observe commerce-reputation
+    observe commerce-verify-match <match_id>
+    observe commerce-network-stats
 """
 import argparse
 import json
@@ -89,7 +93,27 @@ def _cmd_commerce_add_listings(args):
 
 
 def _cmd_commerce_feedback(args):
-    print(commerce.report_purchase_feedback(args.seller_id, args.item_id, args.outcome))
+    print(commerce.report_purchase_feedback(args.seller_id, args.item_id, args.outcome, match_id=args.match_id))
+    return 0
+
+
+def _cmd_commerce_seller_feedback(args):
+    print(commerce.report_seller_feedback(args.match_id, args.outcome, rating=args.rating))
+    return 0
+
+
+def _cmd_commerce_reputation(args):
+    print(commerce.get_my_reputation())
+    return 0
+
+
+def _cmd_commerce_verify_match(args):
+    print(commerce.verify_match(args.match_id))
+    return 0
+
+
+def _cmd_commerce_network_stats(args):
+    print(commerce.get_network_stats())
     return 0
 
 
@@ -127,11 +151,28 @@ def build_parser():
     cal.add_argument("listings_json", help='JSON array, e.g. \'[{"item_id":"sku-1","name":"Boots","description":"..."}]\'')
     cal.set_defaults(func=_cmd_commerce_add_listings)
 
-    cf = sub.add_parser("commerce-feedback", help="Report a real outcome (purchased/not_purchased/irrelevant).")
+    cf = sub.add_parser("commerce-feedback", help="Report a real outcome as the BUYER (purchased/not_purchased/irrelevant).")
     cf.add_argument("seller_id", type=int)
     cf.add_argument("item_id")
     cf.add_argument("outcome", choices=["purchased", "not_purchased", "irrelevant"])
+    cf.add_argument("--match-id", default=None, dest="match_id", help="From a real commerce-search result -- required for this to count toward your reputation tier.")
     cf.set_defaults(func=_cmd_commerce_feedback)
+
+    csf = sub.add_parser("commerce-seller-feedback", help="Report a real outcome as the SELLER (fulfilled/buyer_never_completed/disputed).")
+    csf.add_argument("match_id")
+    csf.add_argument("outcome", choices=["fulfilled", "buyer_never_completed", "disputed"])
+    csf.add_argument("--rating", type=int, default=None, choices=[1, 2, 3, 4, 5])
+    csf.set_defaults(func=_cmd_commerce_seller_feedback)
+
+    rep = sub.add_parser("commerce-reputation", help="Check your own key's real reputation tier.")
+    rep.set_defaults(func=_cmd_commerce_reputation)
+
+    vm = sub.add_parser("commerce-verify-match", help="As a seller: check a buyer's reputation tier for one of your matches, without seeing their identity.")
+    vm.add_argument("match_id")
+    vm.set_defaults(func=_cmd_commerce_verify_match)
+
+    ns = sub.add_parser("commerce-network-stats", help="Public aggregate stats for the whole trust network.")
+    ns.set_defaults(func=_cmd_commerce_network_stats)
 
     return p
 

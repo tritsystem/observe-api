@@ -44,6 +44,7 @@ side effect of a real event, not a dependency of the API's own
 correctness (see commerce_feedback()'s try/except).
 """
 import time
+import uuid
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException
@@ -117,6 +118,7 @@ class CommerceMatch(BaseModel):
     unit_amount: Optional[int]
     currency: str
     memory_boost: float = 0.0  # how much learned affinity (see commerce_spiking_memory.py) nudged this match's score -- 0.0 if never matched together with anything before for this buyer key
+    match_id: str = ""  # real correlation id for the two-sided reputation system -- pass through to /v1/commerce/feedback and (if your checkout flow supports a client reference) to the seller, so their /v1/commerce/seller-feedback report links to the same real event
 
 
 class CommerceSearchResponse(BaseModel):
@@ -154,12 +156,83 @@ class FeedbackRequest(BaseModel):
     seller_id: int
     item_id: str
     outcome: str  # "purchased" | "not_purchased" | "irrelevant"
+    match_id: Optional[str] = None  # optional for backward compat with callers built before this existed
 
 
 class FeedbackResponse(BaseModel):
     recorded: bool
     reinforced: bool
     note: str
+
+
+_VALID_SELLER_OUTCOMES = {"fulfilled", "buyer_never_completed", "disputed"}
+
+
+class SellerFeedbackRequest(BaseModel):
+    match_id: str
+    outcome: str  # "fulfilled" | "buyer_never_completed" | "disputed"
+    rating: Optional[int] = None  # 1-5, optional
+
+
+class SellerFeedbackResponse(BaseModel):
+    recorded: bool
+    note: str
+
+
+class ReputationSummary(BaseModel):
+    tier: str  # "new" | "trusted" | "verified"
+    total_matches: int
+    buyer_confirmed_purchases: int
+    seller_confirmed_fulfillments: int
+    disputes: int
+    note: str = (
+        "Self-reported by both sides, not independently audited -- OBSERVE "
+        "never sees the actual checkout (see commerce_router.py's module "
+        "docstring). A tier reflects agreement between two disconnected "
+        "parties over real time, not a cryptographic guarantee."
+    )
+
+
+class VerifyMatchResponse(BaseModel):
+    found: bool
+    tier: Optional[str] = None
+    buyer_confirmed_purchases: Optional[int] = None
+    seller_confirmed_fulfillments: Optional[int] = None
+    disputes: Optional[int] = None
+
+
+class NetworkStats(BaseModel):
+    total_agents: int
+    verified_agents: int
+    trusted_agents: int
+    total_matches: int
+    total_confirmed_transactions: int
+    total_disputes: int
+    note: str = (
+        "Aggregate, anonymized -- no individual buyer key or seller "
+        "identity is exposed here. See /v1/commerce/my-reputation for "
+        "your own key's detail."
+    )
+
+
+# Reputation tier thresholds -- judgment calls, not measurements (no real
+# transaction volume exists yet to tune these against). Disclosed here,
+# not hidden: "verified" requires BOTH sides' agreement on a real
+# transaction, not just the buyer's own claim -- that's the entire point
+# of the seller-feedback half of this system existing at all.
+TRUSTED_MIN_CONFIRMED = 3
+VERIFIED_MIN_SELLER_CONFIRMED = 5
+VERIFIED_MAX_DISPUTES = 0
+
+
+def _compute_tier(buyer_confirmed: int, seller_confirmed: int, disputes: int) -> str:
+    if disputes > VERIFIED_MAX_DISPUTES:
+        return "new"  # a real dispute resets trust rather than averaging it away
+    if seller_confirmed >= VERIFIED_MIN_SELLER_CONFIRMED:
+        return "verified"
+    if buyer_confirmed >= TRUSTED_MIN_CONFIRMED or seller_confirmed >= 1:
+        return "trusted"
+    return "new"
 
 
 def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_fn, credits_per_search: int = CREDITS_PER_COMMERCE_SEARCH_DEFAULT):
@@ -416,13 +489,30 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
         blended.sort(key=lambda t: -t[0])
 
         top = blended[:req.k]
+
+        # A real match_id per returned match -- the shared correlation
+        # point the two-sided reputation system needs (see
+        # commerce_matches' table comment in db.py). Logged for every
+        # match actually shown, not just ones that convert -- a buyer or
+        # seller can only reference a match_id that genuinely happened.
+        match_ids = [str(uuid.uuid4()) for _ in top]
+        now = time.time()
+        with db.get_conn() as conn:
+            conn.executemany(
+                "INSERT INTO commerce_matches (match_id, buyer_key_hash, seller_id, item_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                [
+                    (mid, key_hash, row["seller_id"], row["item_id"], now)
+                    for mid, (final_score, cosine, boost, row, composite_id) in zip(match_ids, top)
+                ],
+            )
+
         matches = [
             CommerceMatch(
                 score=final_score, seller_name=row["seller_name"], checkout_session_url=row["checkout_session_url"],
                 item_id=row["item_id"], name=row["name"], description=row["description"],
-                unit_amount=row["unit_amount"], currency=row["currency"], memory_boost=boost,
+                unit_amount=row["unit_amount"], currency=row["currency"], memory_boost=boost, match_id=mid,
             )
-            for final_score, cosine, boost, row, composite_id in top
+            for mid, (final_score, cosine, boost, row, composite_id) in zip(match_ids, top)
         ]
 
         # Now that ranking is decided, teach the memory what this search
@@ -470,12 +560,31 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
         if req.outcome not in _VALID_OUTCOMES:
             raise HTTPException(status_code=400, detail=f"outcome must be one of {sorted(_VALID_OUTCOMES)}")
 
+        key_hash = db.hash_key(raw_key)
+
+        # If match_id is given, it's the real correlation point -- verify
+        # it actually belongs to THIS buyer key (closes a real trust gap
+        # the seller_id/item_id-only path below still has: without a
+        # match_id, any authenticated key could report feedback for a
+        # seller/item combo it never actually searched for). Legacy
+        # callers built before match_id existed (the CLI/MCP tools from
+        # before this) still work via the old path.
+        if req.match_id:
+            with db.get_conn() as conn:
+                match = conn.execute(
+                    "SELECT * FROM commerce_matches WHERE match_id = ? AND buyer_key_hash = ?",
+                    (req.match_id, key_hash),
+                ).fetchone()
+            if match is None:
+                raise HTTPException(status_code=404, detail="no match_id found for this key -- it must be one returned by your own earlier /v1/commerce/search call")
+            req.seller_id = match["seller_id"]
+            req.item_id = match["item_id"]
+
         with db.get_conn() as conn:
             seller = conn.execute("SELECT * FROM commerce_sellers WHERE id = ?", (req.seller_id,)).fetchone()
         if seller is None:
             raise HTTPException(status_code=404, detail="no seller with that id")
 
-        key_hash = db.hash_key(raw_key)
         with db.get_conn() as conn:
             conn.execute(
                 "INSERT INTO commerce_feedback (key_hash, seller_id, item_id, outcome, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -548,3 +657,141 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
             "strengthen, never weaken, a learned connection) -- see this endpoint's docstring."
         )
         return FeedbackResponse(recorded=True, reinforced=reinforced, note=note)
+
+    def _reputation_for_key(key_hash: str) -> dict:
+        with db.get_conn() as conn:
+            total_matches = conn.execute(
+                "SELECT COUNT(*) AS n FROM commerce_matches WHERE buyer_key_hash = ?", (key_hash,)
+            ).fetchone()["n"]
+            buyer_confirmed = conn.execute(
+                "SELECT COUNT(*) AS n FROM commerce_feedback WHERE key_hash = ? AND outcome = 'purchased'", (key_hash,)
+            ).fetchone()["n"]
+            seller_confirmed = conn.execute(
+                "SELECT COUNT(*) AS n FROM commerce_seller_feedback sf "
+                "JOIN commerce_matches m ON sf.match_id = m.match_id "
+                "WHERE m.buyer_key_hash = ? AND sf.outcome = 'fulfilled'",
+                (key_hash,),
+            ).fetchone()["n"]
+            disputes = conn.execute(
+                "SELECT COUNT(*) AS n FROM commerce_seller_feedback sf "
+                "JOIN commerce_matches m ON sf.match_id = m.match_id "
+                "WHERE m.buyer_key_hash = ? AND sf.outcome = 'disputed'",
+                (key_hash,),
+            ).fetchone()["n"]
+        return {
+            "tier": _compute_tier(buyer_confirmed, seller_confirmed, disputes),
+            "total_matches": total_matches,
+            "buyer_confirmed_purchases": buyer_confirmed,
+            "seller_confirmed_fulfillments": seller_confirmed,
+            "disputes": disputes,
+        }
+
+    @app.post("/v1/commerce/seller-feedback", response_model=SellerFeedbackResponse)
+    def commerce_seller_feedback(req: SellerFeedbackRequest, authorization: Optional[str] = Header(None)):
+        """The seller-side half of the two-sided reputation loop. Only the
+        seller who OWNS the seller_id referenced by match_id can report on
+        it -- authenticated by their own API key, verified against
+        commerce_sellers.key_hash, not just trusted from the request body.
+        "fulfilled" is real ground truth that a buyer-agent's key can
+        eventually reach "verified" tier from; "disputed" resets that
+        key's tier back to "new" rather than being averaged away (see
+        _compute_tier) -- a real, deliberate asymmetry: trust should be
+        harder to keep than to lose."""
+        raw_key = require_key_fn(authorization)
+        if req.outcome not in _VALID_SELLER_OUTCOMES:
+            raise HTTPException(status_code=400, detail=f"outcome must be one of {sorted(_VALID_SELLER_OUTCOMES)}")
+        if req.rating is not None and not (1 <= req.rating <= 5):
+            raise HTTPException(status_code=400, detail="rating must be 1-5 if given")
+
+        seller_key_hash = db.hash_key(raw_key)
+        with db.get_conn() as conn:
+            match = conn.execute("SELECT * FROM commerce_matches WHERE match_id = ?", (req.match_id,)).fetchone()
+        if match is None:
+            raise HTTPException(status_code=404, detail="no match with that match_id")
+        with db.get_conn() as conn:
+            seller = conn.execute(
+                "SELECT * FROM commerce_sellers WHERE id = ? AND key_hash = ?",
+                (match["seller_id"], seller_key_hash),
+            ).fetchone()
+        if seller is None:
+            raise HTTPException(status_code=403, detail="this match's seller is not owned by your API key")
+
+        with db.get_conn() as conn:
+            conn.execute(
+                "INSERT INTO commerce_seller_feedback (match_id, seller_key_hash, outcome, rating, created_at) VALUES (?, ?, ?, ?, ?)",
+                (req.match_id, seller_key_hash, req.outcome, req.rating, time.time()),
+            )
+        return SellerFeedbackResponse(recorded=True, note="Recorded. Contributes to the buyer key's reputation tier.")
+
+    @app.get("/v1/commerce/my-reputation", response_model=ReputationSummary)
+    def commerce_my_reputation(authorization: Optional[str] = Header(None)):
+        raw_key = require_key_fn(authorization)
+        return ReputationSummary(**_reputation_for_key(db.hash_key(raw_key)))
+
+    @app.get("/v1/commerce/verify-match", response_model=VerifyMatchResponse)
+    def commerce_verify_match(match_id: str, authorization: Optional[str] = Header(None)):
+        """For a seller deciding whether to trust an incoming buyer before
+        fulfilling: pass the match_id you'd have from a buyer referencing
+        it in their real checkout call. Only the owning seller can check
+        it -- returns the buyer's tier and counts, never the buyer's raw
+        key or unrelated transaction history (privacy boundary: a
+        seller learns "is this buyer trustworthy," not "who is this
+        buyer, what else have they bought")."""
+        raw_key = require_key_fn(authorization)
+        seller_key_hash = db.hash_key(raw_key)
+        with db.get_conn() as conn:
+            match = conn.execute("SELECT * FROM commerce_matches WHERE match_id = ?", (match_id,)).fetchone()
+        if match is None:
+            return VerifyMatchResponse(found=False)
+        with db.get_conn() as conn:
+            seller = conn.execute(
+                "SELECT * FROM commerce_sellers WHERE id = ? AND key_hash = ?",
+                (match["seller_id"], seller_key_hash),
+            ).fetchone()
+        if seller is None:
+            raise HTTPException(status_code=403, detail="this match's seller is not owned by your API key")
+        rep = _reputation_for_key(match["buyer_key_hash"])
+        return VerifyMatchResponse(
+            found=True, tier=rep["tier"],
+            buyer_confirmed_purchases=rep["buyer_confirmed_purchases"],
+            seller_confirmed_fulfillments=rep["seller_confirmed_fulfillments"],
+            disputes=rep["disputes"],
+        )
+
+    @app.get("/v1/commerce/network-stats", response_model=NetworkStats)
+    def commerce_network_stats():
+        """Public, no API key needed -- aggregate and anonymized, the
+        "platform" view of the trust network's real size. No individual
+        buyer/seller identity is derivable from this.
+
+        Disclosed scale limitation, not hidden: this recomputes each
+        distinct buyer's tier with its own DB round-trip -- fine at
+        today's real scale (zero production transactions), a real O(N)
+        cost once there are many thousands of distinct agents. The same
+        class of thing the FAISS rewrite fixed for search; not fixed
+        here yet since there's no real traffic to measure against, matching
+        this project's own "measure before assuming it matters" discipline
+        rather than optimizing a number nobody has hit yet."""
+        with db.get_conn() as conn:
+            buyer_hashes = [r["buyer_key_hash"] for r in conn.execute("SELECT DISTINCT buyer_key_hash FROM commerce_matches").fetchall()]
+            total_matches = conn.execute("SELECT COUNT(*) AS n FROM commerce_matches").fetchone()["n"]
+            total_confirmed = conn.execute(
+                "SELECT COUNT(*) AS n FROM commerce_seller_feedback WHERE outcome = 'fulfilled'"
+            ).fetchone()["n"]
+            total_disputes = conn.execute(
+                "SELECT COUNT(*) AS n FROM commerce_seller_feedback WHERE outcome = 'disputed'"
+            ).fetchone()["n"]
+
+        verified = trusted = 0
+        for bh in buyer_hashes:
+            tier = _reputation_for_key(bh)["tier"]
+            if tier == "verified":
+                verified += 1
+            elif tier == "trusted":
+                trusted += 1
+
+        return NetworkStats(
+            total_agents=len(buyer_hashes), verified_agents=verified, trusted_agents=trusted,
+            total_matches=total_matches, total_confirmed_transactions=total_confirmed,
+            total_disputes=total_disputes,
+        )

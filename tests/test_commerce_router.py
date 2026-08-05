@@ -505,3 +505,201 @@ def test_learned_memory_survives_a_simulated_process_restart(client, fresh_db):
         headers={"Authorization": f"Bearer {api_key}"},
     )
     assert resp.json()["matches"][0]["memory_boost"] > 0.0, "learned affinity should have loaded from the DB, not started cold"
+
+
+def test_search_returns_a_real_match_id(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db)
+    _make_seller_and_listing(client, api_key)
+    resp = client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    matches = resp.json()["matches"]
+    assert len(matches) == 1
+    assert matches[0]["match_id"]
+    assert len(matches[0]["match_id"]) == 36  # real uuid4 string length
+
+
+def test_feedback_with_match_id_from_a_different_key_is_rejected(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db)
+    _make_seller_and_listing(client, api_key)
+    match_id = client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    ).json()["matches"][0]["match_id"]
+
+    other_key = _signup_and_fund(client, fresh_db, email="other@example.com")
+    resp = client.post(
+        "/v1/commerce/feedback",
+        json={"seller_id": 1, "item_id": "sku-boots", "outcome": "purchased", "match_id": match_id},
+        headers={"Authorization": f"Bearer {other_key}"},
+    )
+    assert resp.status_code == 404
+
+
+def test_seller_feedback_requires_owning_the_seller(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db)
+    seller_id = _make_seller_and_listing(client, api_key)
+    match_id = client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    ).json()["matches"][0]["match_id"]
+
+    not_the_seller = _signup_and_fund(client, fresh_db, email="not-the-seller@example.com")
+    resp = client.post(
+        "/v1/commerce/seller-feedback",
+        json={"match_id": match_id, "outcome": "fulfilled"},
+        headers={"Authorization": f"Bearer {not_the_seller}"},
+    )
+    assert resp.status_code == 403
+
+
+def test_seller_feedback_rejects_bad_rating(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db)
+    _make_seller_and_listing(client, api_key)
+    match_id = client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    ).json()["matches"][0]["match_id"]
+    resp = client.post(
+        "/v1/commerce/seller-feedback",
+        json={"match_id": match_id, "outcome": "fulfilled", "rating": 9},
+        headers={"Authorization": f"Bearer {api_key}"},  # this key IS the seller too, registered via _make_seller_and_listing
+    )
+    assert resp.status_code == 400
+
+
+def test_reputation_starts_at_new_tier(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db)
+    resp = client.get("/v1/commerce/my-reputation", headers={"Authorization": f"Bearer {api_key}"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["tier"] == "new"
+    assert body["total_matches"] == 0
+
+
+def test_reputation_reaches_verified_after_real_seller_confirmed_fulfillments(client, fresh_db):
+    """The actual point of the two-sided system: a buyer's own
+    self-reported 'purchased' claims alone should NOT be enough for
+    verified -- it takes the SELLER (an independent party) confirming
+    real fulfillments."""
+    buyer_key = _signup_and_fund(client, fresh_db, email="buyer@example.com")
+    seller_key = _signup_and_fund(client, fresh_db, email="seller-owner@example.com")
+    seller_id = client.post(
+        "/v1/commerce/sellers",
+        json={"name": "Trusted Store", "checkout_session_url": "https://store.example.com/checkout_sessions"},
+        headers={"Authorization": f"Bearer {seller_key}"},
+    ).json()["seller_id"]
+    client.post(
+        f"/v1/commerce/sellers/{seller_id}/listings",
+        json={"listings": [{"item_id": "sku-1", "name": "Boots", "description": "hiking boot waterproof", "unit_amount": 12000}]},
+        headers={"Authorization": f"Bearer {seller_key}"},
+    )
+
+    for _ in range(5):
+        match_id = client.post(
+            "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+            headers={"Authorization": f"Bearer {buyer_key}"},
+        ).json()["matches"][0]["match_id"]
+        resp = client.post(
+            "/v1/commerce/seller-feedback",
+            json={"match_id": match_id, "outcome": "fulfilled", "rating": 5},
+            headers={"Authorization": f"Bearer {seller_key}"},
+        )
+        assert resp.status_code == 200
+
+    rep = client.get("/v1/commerce/my-reputation", headers={"Authorization": f"Bearer {buyer_key}"}).json()
+    assert rep["tier"] == "verified"
+    assert rep["seller_confirmed_fulfillments"] == 5
+
+
+def test_a_single_dispute_resets_tier_to_new(client, fresh_db):
+    buyer_key = _signup_and_fund(client, fresh_db, email="buyer2@example.com")
+    seller_key = _signup_and_fund(client, fresh_db, email="seller-owner2@example.com")
+    seller_id = client.post(
+        "/v1/commerce/sellers",
+        json={"name": "Store", "checkout_session_url": "https://store2.example.com/checkout_sessions"},
+        headers={"Authorization": f"Bearer {seller_key}"},
+    ).json()["seller_id"]
+    client.post(
+        f"/v1/commerce/sellers/{seller_id}/listings",
+        json={"listings": [{"item_id": "sku-1", "name": "Boots", "description": "hiking boot waterproof", "unit_amount": 12000}]},
+        headers={"Authorization": f"Bearer {seller_key}"},
+    )
+    for outcome in ["fulfilled", "fulfilled", "fulfilled", "fulfilled", "disputed"]:
+        match_id = client.post(
+            "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+            headers={"Authorization": f"Bearer {buyer_key}"},
+        ).json()["matches"][0]["match_id"]
+        client.post(
+            "/v1/commerce/seller-feedback",
+            json={"match_id": match_id, "outcome": outcome},
+            headers={"Authorization": f"Bearer {seller_key}"},
+        )
+    rep = client.get("/v1/commerce/my-reputation", headers={"Authorization": f"Bearer {buyer_key}"}).json()
+    assert rep["tier"] == "new"
+    assert rep["disputes"] == 1
+
+
+def test_verify_match_hides_buyer_identity_shows_only_tier(client, fresh_db):
+    buyer_key = _signup_and_fund(client, fresh_db, email="buyer3@example.com")
+    seller_key = _signup_and_fund(client, fresh_db, email="seller-owner3@example.com")
+    seller_id = client.post(
+        "/v1/commerce/sellers",
+        json={"name": "Store", "checkout_session_url": "https://store3.example.com/checkout_sessions"},
+        headers={"Authorization": f"Bearer {seller_key}"},
+    ).json()["seller_id"]
+    client.post(
+        f"/v1/commerce/sellers/{seller_id}/listings",
+        json={"listings": [{"item_id": "sku-1", "name": "Boots", "description": "hiking boot waterproof", "unit_amount": 12000}]},
+        headers={"Authorization": f"Bearer {seller_key}"},
+    )
+    match_id = client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {buyer_key}"},
+    ).json()["matches"][0]["match_id"]
+
+    resp = client.get(f"/v1/commerce/verify-match?match_id={match_id}", headers={"Authorization": f"Bearer {seller_key}"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["found"] is True
+    assert body["tier"] == "new"
+    assert "buyer_key_hash" not in body
+    assert "key_hash" not in body
+
+
+def test_verify_match_rejects_a_seller_who_does_not_own_it(client, fresh_db):
+    buyer_key = _signup_and_fund(client, fresh_db, email="buyer4@example.com")
+    seller_key = _signup_and_fund(client, fresh_db, email="seller-owner4@example.com")
+    other_seller_key = _signup_and_fund(client, fresh_db, email="other-seller@example.com")
+    seller_id = client.post(
+        "/v1/commerce/sellers",
+        json={"name": "Store", "checkout_session_url": "https://store4.example.com/checkout_sessions"},
+        headers={"Authorization": f"Bearer {seller_key}"},
+    ).json()["seller_id"]
+    client.post(
+        f"/v1/commerce/sellers/{seller_id}/listings",
+        json={"listings": [{"item_id": "sku-1", "name": "Boots", "description": "hiking boot waterproof", "unit_amount": 12000}]},
+        headers={"Authorization": f"Bearer {seller_key}"},
+    )
+    match_id = client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {buyer_key}"},
+    ).json()["matches"][0]["match_id"]
+
+    resp = client.get(f"/v1/commerce/verify-match?match_id={match_id}", headers={"Authorization": f"Bearer {other_seller_key}"})
+    assert resp.status_code == 403
+
+
+def test_network_stats_is_public_and_aggregate(client, fresh_db):
+    buyer_key = _signup_and_fund(client, fresh_db, email="buyer5@example.com")
+    _make_seller_and_listing(client, buyer_key)
+    client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {buyer_key}"},
+    )
+    resp = client.get("/v1/commerce/network-stats")  # no Authorization header at all
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total_agents"] >= 1
+    assert body["total_matches"] >= 1

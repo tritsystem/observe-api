@@ -29,6 +29,8 @@ def test_all_tools_actually_registered_with_the_real_server():
         "search_code_hosted", "list_repos_hosted", "check_balance",
         "register_seller_hosted", "add_listings_hosted",
         "commerce_search_hosted", "report_purchase_feedback_hosted",
+        "report_seller_feedback_hosted", "check_my_reputation_hosted",
+        "verify_match_hosted", "commerce_network_stats_hosted",
     }
 
 

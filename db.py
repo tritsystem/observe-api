@@ -122,6 +122,38 @@ def init_db():
                 PRIMARY KEY (key_hash, src_item, dst_item)
             )
         """)
+        # A real, shared correlation point between the two disconnected
+        # sides of a transaction (OBSERVE genuinely never sees the actual
+        # checkout, by design -- see commerce_router.py's module
+        # docstring). Every match a buyer sees in a real /v1/commerce/
+        # search response gets a real match_id; the buyer's feedback and
+        # the seller's feedback both reference it, so a reputation score
+        # can be built from BOTH sides agreeing (or disagreeing) about
+        # the same real event instead of trusting one side alone.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS commerce_matches (
+                match_id TEXT PRIMARY KEY,
+                buyer_key_hash TEXT NOT NULL,
+                seller_id INTEGER NOT NULL,
+                item_id TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )
+        """)
+        # The seller-side half of the two-sided feedback loop --
+        # commerce_feedback already captures the buyer's self-report;
+        # this is the seller confirming (or disputing) the same real
+        # match_id. Both being real signals is what makes the reputation
+        # system worth more than trusting either side alone.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS commerce_seller_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                match_id TEXT NOT NULL,
+                seller_key_hash TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                rating INTEGER,
+                created_at REAL NOT NULL
+            )
+        """)
 
 
 def create_api_key(email: str, initial_credits: int = 0) -> str:

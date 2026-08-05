@@ -130,13 +130,52 @@ def commerce_search_hosted(intent: str, max_price: int | None = None, category: 
 
 
 @mcp.tool()
-def report_purchase_feedback_hosted(seller_id: int, item_id: str, outcome: str) -> str:
+def report_purchase_feedback_hosted(seller_id: int, item_id: str, outcome: str, match_id: str | None = None) -> str:
     """Reports a real outcome after calling a match's checkout_session_url
     directly (this API never sees that transaction). outcome: "purchased",
     "not_purchased", or "irrelevant". A confirmed purchase teaches the
     ranking for future searches with this key; self-reported, not
-    independently verified."""
-    return _commerce.report_purchase_feedback(seller_id, item_id, outcome, api_key=API_KEY)
+    independently verified. Pass match_id (from commerce_search_hosted's
+    result) so this counts toward your key's real reputation tier -- see
+    check_my_reputation_hosted."""
+    return _commerce.report_purchase_feedback(seller_id, item_id, outcome, api_key=API_KEY, match_id=match_id)
+
+
+@mcp.tool()
+def report_seller_feedback_hosted(match_id: str, outcome: str, rating: int | None = None) -> str:
+    """As a SELLER: reports what really happened for a match_id a buyer
+    referenced. outcome: "fulfilled", "buyer_never_completed", or
+    "disputed". Only works if your API key owns the match's seller_id.
+    This is the independent, seller-side half of the reputation system --
+    a buyer's own "purchased" claim alone can't reach "verified" tier,
+    only real seller confirmation can."""
+    return _commerce.report_seller_feedback(match_id, outcome, rating=rating, api_key=API_KEY)
+
+
+@mcp.tool()
+def check_my_reputation_hosted() -> str:
+    """Checks your own API key's real reputation tier ("new", "trusted",
+    or "verified") in the commerce trust network, built from real
+    buyer-reported purchases and independent seller-confirmed
+    fulfillments over time."""
+    return _commerce.get_my_reputation(api_key=API_KEY)
+
+
+@mcp.tool()
+def verify_match_hosted(match_id: str) -> str:
+    """As a SELLER deciding whether to trust an incoming buyer: checks the
+    buyer's reputation tier for one of your own matches, without exposing
+    their identity or unrelated transaction history."""
+    return _commerce.verify_match(match_id, api_key=API_KEY)
+
+
+@mcp.tool()
+def commerce_network_stats_hosted() -> str:
+    """Public aggregate stats for the whole ACP commerce trust network
+    (total agents, how many are trusted/verified, total confirmed
+    transactions and disputes) -- no API key needed, no individual
+    identity exposed."""
+    return _commerce.get_network_stats()
 
 
 def main():
