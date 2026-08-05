@@ -60,6 +60,15 @@ def _notify_discord_sale(amount_cents: int, credits: int):
         headers = {
             "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
             "Content-Type": "application/json",
+            # Without a real User-Agent, urllib's default
+            # ("Python-urllib/3.x") gets a Cloudflare error 1010 (bot-
+            # signature block) in front of Discord's API before ever
+            # reaching Discord's own auth/logic -- this was a real, latent
+            # bug here (never fired by a real sale until now), found by
+            # actually testing the identical pattern in a standalone
+            # script and reading the real error body instead of assuming
+            # a bare "403 Forbidden" meant something else.
+            "User-Agent": "DiscordBot (https://github.com/gbranaa4-hue/observe-api, 1.0)",
         }
         # DM channels are opened by recipient_id, not addressed directly --
         # same two-call pattern (open channel, then post to it) Discord's

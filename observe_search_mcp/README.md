@@ -1,6 +1,6 @@
 # observe-search-mcp
 
-MCP client for the hosted [OBSERVE Search API](https://api.observe-search.dev)
+MCP client for the hosted [OBSERVE Search API](https://api.observe-search.online)
 -- pay-per-query semantic code search over curated open source repos
 (React, Django, NumPy, FastAPI, Tokio, and more), for AI agents.
 
@@ -12,7 +12,7 @@ FAISS, no local model download; this package is tiny.
 
 1. Get an API key (free to create, prepaid credits required to search):
    ```
-   curl -X POST https://api.observe-search.dev/v1/signup -d '{"email":"you@example.com"}' -H 'Content-Type: application/json'
+   curl -X POST https://api.observe-search.online/v1/signup -d '{"email":"you@example.com"}' -H 'Content-Type: application/json'
    ```
    Save the returned `api_key` -- it's shown once. Follow `checkout_url` to
    buy credits.

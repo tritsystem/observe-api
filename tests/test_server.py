@@ -51,7 +51,14 @@ def _signup_and_fund(client, fresh_db, email="alice@example.com", credits=10):
     resp = client.post("/v1/signup", json={"email": email})
     assert resp.status_code == 200
     api_key = resp.json()["api_key"]
-    fresh_db.add_credits(fresh_db.hash_key(api_key), credits, f"sess_{email}", credits)
+    # /v1/signup grants a free trial bonus (SIGNUP_BONUS_CREDITS) on top of
+    # whatever this helper adds -- normalize to exactly `credits` regardless
+    # of that bonus's configured value, so tests stay deterministic instead
+    # of silently drifting by the bonus amount (real bug this caught: every
+    # caller of this helper was off by exactly 100, the default bonus).
+    key_hash = fresh_db.hash_key(api_key)
+    current = fresh_db.get_key_record(api_key)["credits"]
+    fresh_db.add_credits(key_hash, credits - current, f"sess_{email}", credits)
     return api_key
 
 
@@ -84,6 +91,13 @@ def test_search_with_unknown_key_is_401(client):
 
 def test_search_with_zero_balance_is_402(client, fresh_db):
     api_key = client.post("/v1/signup", json={"email": "bob@example.com"}).json()["api_key"]
+    # A fresh signup isn't actually zero-balance -- /v1/signup grants a free
+    # trial bonus (SIGNUP_BONUS_CREDITS) by design, so this test drains it
+    # first to reach the zero-balance precondition it's actually testing.
+    key_hash = fresh_db.hash_key(api_key)
+    bonus = fresh_db.get_key_record(api_key)["credits"]
+    if bonus:
+        fresh_db.add_credits(key_hash, -bonus, "sess_drain_bonus", 0)
     resp = client.post(
         "/v1/search",
         json={"query": "retry logic"},

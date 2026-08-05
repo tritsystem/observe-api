@@ -12,3 +12,6 @@ __pycache__/
 data/
 models/
 private/
+.env.*
+!*.env.example
+*.log

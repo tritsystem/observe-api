@@ -6,14 +6,25 @@ call, prepaid credits (via Stripe Checkout, see billing.py) fund usage,
 fully automated end to end -- no human review in the signup/payment/search
 loop.
 """
+import asyncio
+import faulthandler
 import os
+import signal
 from contextlib import asynccontextmanager
 from typing import Optional
+
+# Debug-only: SIGUSR1 dumps every thread's real Python stack trace to
+# server.log. Added to actually end a real, repeated (4 different
+# structural fixes tried, all failed) startup deadlock this session
+# instead of continuing to infer what's stuck from CPU/IO/FD proxies --
+# `kill -USR1 <pid>` on the next hang gets the real answer directly.
+faulthandler.register(signal.SIGUSR1)
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, EmailStr
 
+import a2a_adapter
 import billing
 import db
 import rate_limit
@@ -50,9 +61,37 @@ async def lifespan(app: FastAPI):
     # chunks now vs. whatever this was originally tuned against) and with
     # whatever else is competing for CPU/GPU on the host at startup time --
     # the 180s default undershot both of those in practice.
+    #
+    # Run via asyncio.to_thread, NOT called directly -- load_blocking()
+    # itself spawns a second thread (SearchEngine.load()'s own
+    # threading.Thread, shared with the GUI desktop app's non-blocking
+    # use case) and busy-polls it with a synchronous time.sleep(0.2) loop.
+    # Calling that directly from this coroutine froze uvicorn's asyncio
+    # event loop for the entire load (a synchronous blocking call inside
+    # an async function doesn't yield), and repeatedly, reproducibly
+    # deadlocked real startups this session (40min-7.5hrs) even though the
+    # identical load logic completed in ~60s every time when reproduced
+    # standalone outside a running event loop. asyncio.to_thread moves the
+    # whole blocking call to a worker thread so the event loop stays live
+    # throughout -- root cause not fully isolated beyond "the frozen event
+    # loop was a real, necessary ingredient," but this is also just
+    # correct practice for blocking work inside an async function
+    # regardless.
     load_timeout = int(os.environ.get("OBSERVE_LOAD_TIMEOUT_SECONDS", "900"))
-    status = engine.load_blocking(INDEX_DIR, MODEL_PATH, timeout=load_timeout)
-    print(f"[startup] engine ready: {status}")
+    status = await asyncio.to_thread(engine.load_blocking, INDEX_DIR, MODEL_PATH, load_timeout)
+    # flush=True: stdout is block-buffered (not line-buffered) when
+    # redirected to a file, not a TTY -- without this, a real completion
+    # print sat unflushed for the entire process lifetime, making a
+    # genuinely-finished, genuinely-working server look permanently stuck
+    # to anything grepping server.log for this line. Real, costly bug this
+    # session: repeatedly killed servers that had actually already loaded
+    # successfully and were serving real search results, based on a log
+    # file that just hadn't received the bytes yet. PYTHONUNBUFFERED=1 on
+    # the process env is the more robust fix (catches this for every
+    # print, not just this one) -- see restart script -- flush=True here
+    # too since relying only on an external env var for a status line this
+    # important isn't enough on its own.
+    print(f"[startup] engine ready: {status}", flush=True)
     yield
 
 
@@ -111,6 +150,12 @@ class SearchRequest(BaseModel):
     query: str
     k: int = 10
     repo: Optional[str] = None  # optional: scope to one indexed repo's base_dir
+    # Reframes results as unverified candidates instead of ranked answers --
+    # a semantic match is correlation with the query, not proof a given
+    # location causes whatever behavior the agent is actually investigating
+    # (root-causing a bug, explaining a regression, etc.). Template-only in
+    # v1 (no LLM call, no added cost) -- see verification_hint below.
+    investigate: bool = False
 
 
 class SearchResult(BaseModel):
@@ -118,11 +163,13 @@ class SearchResult(BaseModel):
     path: str
     preview: str
     repo: Optional[str] = None
+    verification_hint: Optional[str] = None
 
 
 class SearchResponse(BaseModel):
     results: list[SearchResult]
     credits_remaining: int
+    note: Optional[str] = None
 
 
 @app.post("/v1/search", response_model=SearchResponse)
@@ -168,10 +215,30 @@ def search(req: SearchRequest, authorization: Optional[str] = Header(None)):
     record = db.get_key_record(raw_key)
     return SearchResponse(
         results=[
-            SearchResult(score=r["score"], path=r["path"], preview=r["preview"], repo=req.repo)
+            SearchResult(
+                score=r["score"],
+                path=r["path"],
+                preview=r["preview"],
+                repo=req.repo,
+                verification_hint=_verification_hint(r["path"]) if req.investigate else None,
+            )
             for r in raw_results
         ],
         credits_remaining=record["credits"],
+        note=(
+            "investigate mode: results below are unverified candidates ranked by semantic "
+            "similarity to your query, not confirmed causes. Each has a suggested falsification "
+            "test -- run it before treating a candidate as the actual cause."
+        ) if req.investigate else None,
+    )
+
+
+def _verification_hint(path: str) -> str:
+    return (
+        f"Unverified candidate -- {path} matched semantically but hasn't been tested as the "
+        f"actual cause. Before treating it as the cause: isolate {path} (stub it out, disable "
+        f"it, or add instrumentation around it) and re-run the behavior you're investigating "
+        f"to see whether it persists without this code path."
     )
 
 
@@ -334,3 +401,8 @@ class _RepoRegistry:
 
 
 REPO_REGISTRY = _RepoRegistry()
+
+# Real A2A protocol support, not just a discovery manifest -- see
+# a2a_adapter.py's module docstring for what's actually implemented (v1:
+# message:send with a plain-text query only) vs. deferred.
+a2a_adapter.register_a2a_routes(app, engine, db, rate_limit, _require_key, CREDITS_PER_SEARCH)

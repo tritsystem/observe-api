@@ -17,7 +17,7 @@ import sys
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-API_BASE = os.environ.get("OBSERVE_API_BASE", "https://api.observe-search.dev")
+API_BASE = os.environ.get("OBSERVE_API_BASE", "https://api.observe-search.online")
 API_KEY = os.environ.get("OBSERVE_API_KEY")
 
 mcp = FastMCP("observe-hosted-search")

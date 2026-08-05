@@ -75,8 +75,11 @@ POST /v1/signup           {"email": "..."}  -> {"api_key": "obs_...", "checkout_
 GET  /v1/balance          Authorization: Bearer obs_...  -> {"credits": N}
 GET  /v1/repos            -> {"repos": ["react", "django", ...]}
 POST /v1/search           Authorization: Bearer obs_...
-                           {"query": "...", "k": 10, "repo": "react"}  (repo optional)
-                           -> {"results": [{"score", "path", "preview", "repo"}], "credits_remaining": N}
+                           {"query": "...", "k": 10, "repo": "react", "investigate": false}  (repo, investigate optional)
+                           -> {"results": [{"score", "path", "preview", "repo", "verification_hint"}], "credits_remaining": N, "note"}
+                           -> investigate:true labels results as unverified candidates instead of ranked
+                              answers, each with a suggested falsification test -- see "investigate mode"
+                              below. Same credit cost as a normal search either way.
 
 POST /v1/private/index    Authorization: Bearer obs_...  {"git_url": "https://github.com/<owner>/<repo>"}
                            -> {"status": "indexing", "credits_remaining": N}  (github.com/gitlab.com/bitbucket.org only)
@@ -85,6 +88,47 @@ POST /v1/private/search   Authorization: Bearer obs_...  {"query": "...", "k": 1
                            -> same shape as /v1/search, scoped to ONLY this key's own indexed repo
                            -> 404 if this key has no ready private index yet
 ```
+
+See [`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md) for how to actually wire
+this into an agent's toolset -- MCP/LangChain/CrewAI get the "when to call
+this vs. grep" motive for free from the tool description; a raw HTTP/custom
+agent integration needs that guidance written into its own system prompt,
+with a real example.
+
+## investigate mode (experimental)
+
+`POST /v1/search` with `"investigate": true` reframes results as **unverified
+candidates instead of ranked answers**, each with a `verification_hint`
+suggesting a concrete falsification test (isolate the candidate, re-run the
+behavior you're investigating, see if it persists). Template-only in v1 --
+no LLM call, no added cost, same credit price as a normal search. Motivated
+by [gbranaa4-hue/methodlm](https://github.com/gbranaa4-hue/methodlm)'s
+causal-discipline framing (pre-register a hypothesis, falsify before
+confirming) applied to code search instead of tabular data.
+
+**The actual value isn't better ranking -- it's not acting on a wrong one.**
+Measured against 10 realistic root-cause queries (memory leaks, race
+conditions, deadlocks, N+1 queries, stale caches, buffer overflows, hangs,
+timezone bugs -- top-3 each, 30 results total, manually assessed for
+relevance, not an automated benchmark):
+- **25/30 candidates genuinely on-topic** -- e.g. "off by one error in
+  pagination" returned `django/core/paginator.py` for all 3, "buffer
+  overflow in string parsing" surfaced `resp_parser.c`'s own comment "NOT
+  SAFE FOR PARSING USER INPUT".
+- **3/30 weak/tangential** (plausible-looking but not really the mechanism
+  asked about).
+- **2/30 clearly wrong**, both keyword-collision false positives: "race
+  condition causing flaky test" pulled in a CI documentation file (matched
+  on "test"/"CI", unrelated to race conditions); "N+1 query problem in ORM"
+  pulled in FastAPI's `Query()` parameter docs (matched on "query", wrong
+  meaning of the word entirely).
+
+Those 2 wrong results are the actual point: without investigate mode, an
+agent has no signal that rank #2 might be a keyword-collision rather than a
+real answer. With it, the same wrong candidate gets the same "unverified,
+here's how to falsify it" hint as a right one -- an agent that ran the
+suggested test on the CI.md result would immediately see the race condition
+persists, and correctly rule it out instead of citing it as the cause.
 
 ## Honest limitations (v1, disclosed not hidden)
 

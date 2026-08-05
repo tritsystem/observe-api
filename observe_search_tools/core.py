@@ -8,7 +8,7 @@ from typing import Optional
 
 import httpx
 
-API_BASE = os.environ.get("OBSERVE_API_BASE", "https://api.observe-search.dev")
+API_BASE = os.environ.get("OBSERVE_API_BASE", "https://api.observe-search.online")
 
 
 def search(query: str, k: int = 10, repo: Optional[str] = None, api_key: Optional[str] = None) -> str:

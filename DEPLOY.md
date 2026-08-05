@@ -66,9 +66,11 @@ mode first if you want a dry run before going live) to confirm credits
 actually land.
 
 ## 9. Only after 8 passes for real: update references + go public
-- If the domain isn't `api.observe-search.dev` (the placeholder baked into
-  `llms.txt` and `observe_search_mcp/`), update those two files to the real
-  domain and push.
+- Done: live domain is `api.observe-search.online`, not the `.dev`
+  placeholder that was still baked into `llms.txt`, `observe_search_mcp/`,
+  and `observe_search_tools/` after the domain migration -- caught and
+  fixed (would have silently broken anyone who installed the MCP/SDK
+  packages and never overrode `OBSERVE_API_BASE`).
 - Submit to the registries listed in `launch/registry-submissions.md`
   (requires your own GitHub/account identity on each PR/form).
 - Post the drafted Show HN / blog content in `launch/`.

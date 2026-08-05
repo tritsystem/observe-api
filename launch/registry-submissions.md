@@ -24,7 +24,7 @@ format, open a PR.
 
 ## 2. Smithery (smithery.ai)
 
-**How**: `smithery mcp publish "https://api.observe-search.dev" -n <yourorg>/observe-search-mcp`
+**How**: `smithery mcp publish "https://api.observe-search.online" -n <yourorg>/observe-search-mcp`
 via the Smithery CLI, or the web dashboard at smithery.ai.
 
 **Metadata**:
