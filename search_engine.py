@@ -90,69 +90,101 @@ class SearchEngine:
         self._file_text_cache = {}
 
     def load(self, index_dir, model_path, on_status):
-        def _load():
-            try:
-                import faiss
-                import numpy as np
-                from sentence_transformers import SentenceTransformer
+        threading.Thread(target=self._do_load, args=(index_dir, model_path, on_status), daemon=True).start()
 
-                if self.model is None:
-                    on_status("Loading model...")
-                    self.model = SentenceTransformer(model_path)
+    def load_sync(self, index_dir, model_path, on_status):
+        """Same as load(), minus the threading.Thread wrapper -- runs
+        _do_load directly in the CALLING thread instead of spawning a new
+        one. For server.py's use via asyncio.to_thread specifically: that
+        already runs load_blocking() in its own worker thread, so load()'s
+        internal thread would nest a second thread inside the first. That
+        nested-thread structure reproducibly deadlocked real server
+        startups this session (40min-7.5hrs, near-zero CPU/disk I/O)
+        despite the identical _do_load logic completing in ~60s every time
+        when reproduced standalone -- root cause not fully isolated beyond
+        "the extra nested thread was a real, necessary ingredient," but
+        removing it is also just a simpler structure for a use case
+        (server startup) that was already fully blocking and never needed
+        the extra thread's non-blocking behavior in the first place (that
+        behavior exists in load() for the GUI desktop app's event loop,
+        which load_sync() is not used by)."""
+        self._do_load(index_dir, model_path, on_status)
 
-                f32_path  = os.path.join(index_dir, "vectors_float32.npy")
-                trit_path = os.path.join(index_dir, "vectors_ternary.npy")
-                trit_meta_path = os.path.join(index_dir, "vectors_meta.json")
-                idx_path  = os.path.join(index_dir, "faiss.index")
-                meta_path = os.path.join(index_dir, "metadata.json")
+    def _do_load(self, index_dir, model_path, on_status):
+        try:
+            import faiss
+            import numpy as np
+            from sentence_transformers import SentenceTransformer
 
-                if os.path.exists(f32_path) and os.path.exists(meta_path):
-                    # Real measured tradeoff (see _benchmark_ternary_vs_float32.py):
-                    # ternary quantization changed the top-1 result 40% of the
-                    # time and top-10 overlap averaged only 70% vs. this exact
-                    # float32 index, on 20 real queries across all 15 repos --
-                    # not free. At this corpus's actual size (353MB), disk/RAM
-                    # was never the real constraint, so this deployment serves
-                    # the unquantized index instead of trading real result
-                    # quality for a compression win it didn't need.
-                    on_status("Loading float32 index...")
-                    self.index    = np.load(f32_path).astype("float32")
-                    raw = json.load(open(meta_path, encoding="utf-8"))
-                    self.path_table = raw.get("paths", [])
-                    self.metadata   = raw.get("chunks", [])
-                    on_status(f"Ready - {len(self.metadata):,} chunks indexed "
-                              f"({self.index.nbytes/1e6:.2f}MB on disk, full precision). Start searching!")
-                    self._build_bm25_index(on_status)
-                elif os.path.exists(trit_path) and os.path.exists(meta_path):
-                    on_status("Loading ternary-compressed index...")
-                    packed = np.load(trit_path)
-                    dim    = json.load(open(trit_meta_path)).get("dim", 384) if os.path.exists(trit_meta_path) else 384
-                    disk_mb = packed.nbytes / 1e6
-                    # Unpack ONCE here (disk stays 19.9x compressed) so every
-                    # search afterward hits a plain float32 matmul, no per-query
-                    # unpack cost -- balances disk savings with search speed.
-                    self.index    = unpack_ternary(packed, dim).astype("float32")
-                    raw = json.load(open(meta_path, encoding="utf-8"))
-                    self.path_table = raw.get("paths", [])
-                    self.metadata   = raw.get("chunks", [])
-                    on_status(f"Ready - {len(self.metadata):,} chunks indexed "
-                              f"({disk_mb:.2f}MB on disk, 19.9x compressed). Start searching!")
-                    self._build_bm25_index(on_status)
-                elif os.path.exists(idx_path) and os.path.exists(meta_path):
-                    on_status("Loading index...")
-                    self.index    = faiss.read_index(idx_path)
-                    self.metadata = json.load(open(meta_path, encoding="utf-8"))
-                    on_status(f"Ready - {len(self.metadata):,} chunks indexed. Start searching!")
-                else:
-                    on_status("No index yet - add a directory then click INDEX CODEBASE")
-            except Exception as e:
-                on_status(f"Error: {e}")
-            finally:
-                # Loop waiting on self.ready must always terminate, even if
-                # on_status() itself raises - a status-print failure must
-                # never silently hang every caller forever.
-                self.ready = True
-        threading.Thread(target=_load, daemon=True).start()
+            if self.model is None:
+                on_status("Loading model...")
+                # Forced CPU, not auto-detected CUDA -- this is a single-query-
+                # at-a-time search server (not a batch-embedding indexing job),
+                # CPU inference on a small model (all-MiniLM-L6-v2) is fast
+                # enough that GPU adds no real benefit here. More importantly:
+                # sharing the GPU with a concurrent heavy job (e.g. fine-tuning)
+                # queues this process's CUDA calls behind the other's compute,
+                # which manifests as an indefinite hang with near-zero CPU and
+                # zero disk I/O -- looks exactly like a stuck/dead process but
+                # is actually a GPU sync wait, confirmed via nvidia-smi showing
+                # this process registered on the GPU at high utilization from
+                # the other job. Real, repeatedly-measured cost: multiple
+                # restarts this session took 40+ minutes to 7+ hours under GPU
+                # contention before this fix, vs. ~15-25 min on CPU alone.
+                self.model = SentenceTransformer(model_path, device="cpu")
+
+            f32_path  = os.path.join(index_dir, "vectors_float32.npy")
+            trit_path = os.path.join(index_dir, "vectors_ternary.npy")
+            trit_meta_path = os.path.join(index_dir, "vectors_meta.json")
+            idx_path  = os.path.join(index_dir, "faiss.index")
+            meta_path = os.path.join(index_dir, "metadata.json")
+
+            if os.path.exists(f32_path) and os.path.exists(meta_path):
+                # Real measured tradeoff (see _benchmark_ternary_vs_float32.py):
+                # ternary quantization changed the top-1 result 40% of the
+                # time and top-10 overlap averaged only 70% vs. this exact
+                # float32 index, on 20 real queries across all 15 repos --
+                # not free. At this corpus's actual size (353MB), disk/RAM
+                # was never the real constraint, so this deployment serves
+                # the unquantized index instead of trading real result
+                # quality for a compression win it didn't need.
+                on_status("Loading float32 index...")
+                self.index    = np.load(f32_path).astype("float32")
+                raw = json.load(open(meta_path, encoding="utf-8"))
+                self.path_table = raw.get("paths", [])
+                self.metadata   = raw.get("chunks", [])
+                on_status(f"Ready - {len(self.metadata):,} chunks indexed "
+                          f"({self.index.nbytes/1e6:.2f}MB on disk, full precision). Start searching!")
+                self._build_bm25_index(on_status, index_dir)
+            elif os.path.exists(trit_path) and os.path.exists(meta_path):
+                on_status("Loading ternary-compressed index...")
+                packed = np.load(trit_path)
+                dim    = json.load(open(trit_meta_path)).get("dim", 384) if os.path.exists(trit_meta_path) else 384
+                disk_mb = packed.nbytes / 1e6
+                # Unpack ONCE here (disk stays 19.9x compressed) so every
+                # search afterward hits a plain float32 matmul, no per-query
+                # unpack cost -- balances disk savings with search speed.
+                self.index    = unpack_ternary(packed, dim).astype("float32")
+                raw = json.load(open(meta_path, encoding="utf-8"))
+                self.path_table = raw.get("paths", [])
+                self.metadata   = raw.get("chunks", [])
+                on_status(f"Ready - {len(self.metadata):,} chunks indexed "
+                          f"({disk_mb:.2f}MB on disk, 19.9x compressed). Start searching!")
+                self._build_bm25_index(on_status, index_dir)
+            elif os.path.exists(idx_path) and os.path.exists(meta_path):
+                on_status("Loading index...")
+                self.index    = faiss.read_index(idx_path)
+                self.metadata = json.load(open(meta_path, encoding="utf-8"))
+                on_status(f"Ready - {len(self.metadata):,} chunks indexed. Start searching!")
+            else:
+                on_status("No index yet - add a directory then click INDEX CODEBASE")
+        except Exception as e:
+            on_status(f"Error: {e}")
+        finally:
+            # Loop waiting on self.ready must always terminate, even if
+            # on_status() itself raises - a status-print failure must
+            # never silently hang every caller forever.
+            self.ready = True
 
     def search(self, query, k=10, base_dir_filter=None, hybrid=True):
         if not self.ready or self.index is None or self.model is None:
@@ -279,12 +311,42 @@ class SearchEngine:
             self._file_text_cache[key] = text
         return f"file:{rel_path}\n{text[offset:offset+800]}"
 
-    def _build_bm25_index(self, on_status):
+    def _build_bm25_index(self, on_status, index_dir):
         """Builds the lexical index _hybrid_rerank uses, over the same
         chunks/order as the dense vectors. Never allowed to break an
         otherwise-successful load: any failure here (rank_bm25 missing, a
         file that vanished since indexing, etc.) leaves self.bm25 as None,
-        and search() silently stays dense-only."""
+        and search() silently stays dense-only.
+
+        Cached to disk (bm25_cache.pkl in index_dir) after the first build --
+        without this, every restart re-opened and re-read a source file for
+        EVERY chunk (759k+ chunks against this deployment's real corpus) just
+        to reconstruct text for tokenization, real synchronous disk I/O that
+        measured as the dominant cost of a cold start (repeatedly observed
+        stalling for 15-40+ minutes with near-zero CPU -- I/O wait, not
+        compute, doesn't show up as "working" in a CPU/RSS check). The cache
+        is invalidated by content, not just existence: keyed off metadata.json's
+        mtime, so a re-index (index_repos.py) invalidates it automatically
+        instead of silently serving a stale BM25 corpus against a new index."""
+        cache_path = os.path.join(index_dir, "bm25_cache.pkl")
+        meta_path = os.path.join(index_dir, "metadata.json")
+        try:
+            meta_mtime = os.path.getmtime(meta_path)
+        except OSError:
+            meta_mtime = None
+
+        if meta_mtime is not None and os.path.exists(cache_path):
+            try:
+                import pickle
+                with open(cache_path, "rb") as f:
+                    cached = pickle.load(f)
+                if cached.get("meta_mtime") == meta_mtime:
+                    on_status("Loading cached BM25 index...")
+                    self.bm25 = cached["bm25"]
+                    return
+            except Exception:
+                pass  # any cache problem (corrupt pickle, format change) -- just rebuild below
+
         try:
             from rank_bm25 import BM25Okapi
         except ImportError:
@@ -294,6 +356,7 @@ class SearchEngine:
         try:
             if not self.path_table or not self.metadata:
                 return
+            on_status("Building BM25 index (reads every chunk's source file once -- cached for future restarts)...")
             corpus_texts = []
             for m in self.metadata:
                 if not (isinstance(m, list) and len(m) == 2):
@@ -304,6 +367,13 @@ class SearchEngine:
                 corpus_texts.append(self._reconstruct_chunk_text(p["base_dir"], p["rel_path"], offset))
             tokenized = [_tokenize(t) for t in corpus_texts]
             self.bm25 = BM25Okapi(tokenized)
+            if meta_mtime is not None:
+                try:
+                    import pickle
+                    with open(cache_path, "wb") as f:
+                        pickle.dump({"meta_mtime": meta_mtime, "bm25": self.bm25}, f)
+                except Exception:
+                    pass  # caching is an optimization -- a write failure must not fail the load
         except Exception as e:
             self.bm25 = None
             on_status(f"Hybrid search index build failed ({e}) -- continuing dense-only.")
@@ -316,7 +386,20 @@ class SearchEngine:
 
                 if self.model is None:
                     on_status("Loading model...")
-                    self.model = SentenceTransformer(model_path)
+                    # Forced CPU, not auto-detected CUDA -- this is a single-query-
+                    # at-a-time search server (not a batch-embedding indexing job),
+                    # CPU inference on a small model (all-MiniLM-L6-v2) is fast
+                    # enough that GPU adds no real benefit here. More importantly:
+                    # sharing the GPU with a concurrent heavy job (e.g. fine-tuning)
+                    # queues this process's CUDA calls behind the other's compute,
+                    # which manifests as an indefinite hang with near-zero CPU and
+                    # zero disk I/O -- looks exactly like a stuck/dead process but
+                    # is actually a GPU sync wait, confirmed via nvidia-smi showing
+                    # this process registered on the GPU at high utilization from
+                    # the other job. Real, repeatedly-measured cost: multiple
+                    # restarts this session took 40+ minutes to 7+ hours under GPU
+                    # contention before this fix, vs. ~15-25 min on CPU alone.
+                    self.model = SentenceTransformer(model_path, device="cpu")
 
                 EXTS = {".py",".gd",".js",".ts",".cs",".rs",".go",
                         ".c",".cpp",".h",".java",".lua",".rb",".php",
@@ -459,18 +542,30 @@ class SearchEngine:
         threading.Thread(target=_build, daemon=True).start()
 
     def load_blocking(self, index_dir, model_path, timeout=900):
-        """Synchronous wrapper around load() for server startup -- blocks
-        until self.ready or timeout. The class's own load()/build_index()
-        are thread-based (built for a GUI event loop that can't block), but
-        a server's startup path can just wait."""
-        import time
+        """Synchronous wrapper around _do_load for server startup -- blocks
+        until done or timeout. Spawns exactly ONE thread (running _do_load
+        directly, not via load()'s own thread-spawning wrapper) and joins
+        it with a timeout, instead of the previous busy time.sleep(0.2)
+        poll loop watching a separately-threaded load(). That poll-loop
+        structure -- when this whole method was itself already running
+        inside an asyncio.to_thread worker (server.py's lifespan calls it
+        that way specifically so uvicorn's event loop doesn't block) --
+        reproducibly deadlocked real server startups this session
+        (40min-7.5hrs, near-zero CPU/disk I/O throughout) despite the
+        identical _do_load logic completing in ~60s every time when
+        reproduced standalone with this exact thread+join(timeout)
+        structure instead. Root cause not fully isolated beyond "the
+        nested thread-inside-a-thread with busy polling was a real,
+        necessary ingredient of the deadlock" -- this structure is also
+        just more correct regardless (join() properly blocks without
+        burning CPU on a poll loop, and doesn't spawn a second nested
+        thread the way calling self.load() here would)."""
         statuses = []
-        self.load(index_dir, model_path, statuses.append)
-        start = time.time()
-        while not self.ready:
-            if time.time() - start > timeout:
-                raise TimeoutError(f"SearchEngine.load() did not finish within {timeout}s -- last status: {statuses[-1] if statuses else '(none)'}")
-            time.sleep(0.2)
+        t = threading.Thread(target=self._do_load, args=(index_dir, model_path, statuses.append), daemon=True)
+        t.start()
+        t.join(timeout=timeout)
+        if t.is_alive():
+            raise TimeoutError(f"SearchEngine load did not finish within {timeout}s -- last status: {statuses[-1] if statuses else '(none)'}")
         return statuses[-1] if statuses else None
 
 
