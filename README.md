@@ -130,7 +130,26 @@ here's how to falsify it" hint as a right one -- an agent that ran the
 suggested test on the CI.md result would immediately see the race condition
 persists, and correctly rule it out instead of citing it as the cause.
 
-## Agentic Commerce Protocol (ACP) buyer/seller routing (new)
+## Also reachable via Google's Universal Commerce Protocol (new)
+
+Real finding from reading UCP's actual spec (github.com/Universal-
+Commerce-Protocol/ucp), not assumed: Google didn't join ACP -- it built
+a separate, non-interoperable protocol (launched 2026-01-11 with
+Shopify/Etsy/Wayfair/Target/Walmart), and it has the EXACT same
+single-business scoping gap ACP does ("no aggregation layer, federated
+search mechanism, or marketplace-wide product indexing," per the spec's
+own overview). `ucp_adapter.py` fills that gap for UCP the same way
+`commerce_router.py` fills it for ACP: `GET /.well-known/ucp` publishes
+a real UCP business profile, `POST /ucp/catalog/search` returns real
+UCP Product/Variant objects, both reusing the exact same FAISS-backed
+search (verified with a test: both endpoints return the same listing
+for the same query, proving one shared implementation, not two that
+could drift). Disclosed, not hidden: every listing maps to one variant
+(no options support), and HTTP Message Signatures (UCP's own real
+request-signing scheme) aren't implemented yet -- reachable over plain
+Bearer/X-Api-Key auth instead.
+
+## Agentic Commerce Protocol (ACP) buyer/seller routing
 
 commerce_router.py adds an ACP-compatible discovery/matching layer, not
 a reimplementation of ACP checkout itself. Read directly from the real
