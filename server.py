@@ -21,6 +21,7 @@ from typing import Optional
 faulthandler.register(signal.SIGUSR1)
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, EmailStr
 
@@ -107,6 +108,20 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="OBSERVE Search API", version="1.0.0", lifespan=lifespan)
+
+# Open CORS, not an oversight -- this API's real security boundary is the
+# Bearer API key + credit gate on every paying call, the same model
+# public APIs like Stripe's own use, not same-origin restriction. Without
+# this, no browser-based client (including this project's own live demo
+# widgets) could call the API at all -- every request would be silently
+# blocked by the browser before it ever reached this server, regardless
+# of what the API itself allows.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type", "X-Api-Key"],
+)
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
