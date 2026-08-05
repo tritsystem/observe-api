@@ -156,11 +156,6 @@ class SearchRequest(BaseModel):
     # (root-causing a bug, explaining a regression, etc.). Template-only in
     # v1 (no LLM call, no added cost) -- see verification_hint below.
     investigate: bool = False
-    # Undocumented, for measuring whether BM25 lexical overlap is what's
-    # dragging keyword-collision false positives into investigate mode's
-    # results (see README's 2/30 false-positive cases) -- not a committed
-    # public API param, remove or promote after that's actually measured.
-    hybrid: bool = True
 
 
 class SearchResult(BaseModel):
@@ -210,7 +205,7 @@ def search(req: SearchRequest, authorization: Optional[str] = Header(None)):
         raise HTTPException(status_code=402, detail="insufficient credits -- purchase more via /v1/signup")
 
     try:
-        raw_results = engine.search(req.query, k=req.k, base_dir_filter=base_dir_filter, hybrid=req.hybrid)
+        raw_results = engine.search(req.query, k=req.k, base_dir_filter=base_dir_filter)
     except Exception:
         db.deduct_credit(raw_key, -CREDITS_PER_SEARCH)  # refund -- don't charge for a failed search
         raise HTTPException(status_code=500, detail="search failed -- credit refunded, please retry")
