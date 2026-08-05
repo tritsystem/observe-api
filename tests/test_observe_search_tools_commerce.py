@@ -41,7 +41,7 @@ def test_register_seller_success():
 def test_commerce_search_formats_real_matches():
     fake_body = {
         "matches": [{
-            "seller_name": "Trailhead", "name": "Boots", "unit_amount": 12000, "currency": "usd",
+            "seller_id": 7, "seller_name": "Trailhead", "name": "Boots", "unit_amount": 12000, "currency": "usd",
             "score": 0.933, "checkout_session_url": "https://x.example.com/checkout_sessions", "item_id": "sku-1",
         }],
         "credits_remaining": 42,
@@ -50,6 +50,7 @@ def test_commerce_search_formats_real_matches():
         result = commerce.commerce_search("waterproof boots", api_key="obs_test")
     assert "Trailhead" in result
     assert "sku-1" in result
+    assert "seller_id=7" in result  # real bug found by an independent agent live-testing this: seller_id used to be missing entirely, forcing a guess
     assert "120.00 usd" in result
     assert "42 credits remaining" in result
 

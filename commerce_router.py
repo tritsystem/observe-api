@@ -110,6 +110,7 @@ class CommerceSearchRequest(BaseModel):
 
 class CommerceMatch(BaseModel):
     score: float
+    seller_id: int  # real bug found live: an independent agent had to GUESS this to call /v1/commerce/feedback, since only seller_name was ever returned here
     seller_name: str
     checkout_session_url: str
     item_id: str
@@ -508,7 +509,7 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
 
         matches = [
             CommerceMatch(
-                score=final_score, seller_name=row["seller_name"], checkout_session_url=row["checkout_session_url"],
+                score=final_score, seller_id=row["seller_id"], seller_name=row["seller_name"], checkout_session_url=row["checkout_session_url"],
                 item_id=row["item_id"], name=row["name"], description=row["description"],
                 unit_amount=row["unit_amount"], currency=row["currency"], memory_boost=boost, match_id=mid,
             )

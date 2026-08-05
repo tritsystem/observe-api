@@ -82,7 +82,7 @@ def commerce_search(intent: str, max_price: Optional[int] = None, category: Opti
     for m in data["matches"]:
         price = f"{m['unit_amount'] / 100:.2f} {m['currency']}" if m.get("unit_amount") else "price not listed"
         lines.append(
-            f"[{m['seller_name']}] {m['name']} — {price} (score {m['score']:.3f})\n"
+            f"[{m['seller_name']} (seller_id={m['seller_id']})] {m['name']} — {price} (score {m['score']:.3f})\n"
             f"  checkout: {m['checkout_session_url']}  item_id={m['item_id']}  match_id={m.get('match_id', '')}\n"
         )
     return "\n".join(lines)
