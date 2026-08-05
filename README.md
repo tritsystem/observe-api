@@ -271,6 +271,26 @@ persists, and correctly rule it out instead of citing it as the cause.
   LLM-generated per chunk) might work; this one, evidence in hand,
   doesn't. Don't re-enable `code-minilm-v2` (or the original checkpoint)
   without a benchmark proving it beats stock first.
+  **Re-tested at 2x scale (2026-08-04), same negative result confirmed:**
+  after the corpus grew from 15 to 29 repos, retrained clean on the full
+  759k-chunk corpus (55,091.9s, real wall-clock -- not a quick job),
+  87.6% self-retrieval accuracy on held-out pairs (`438/500`) -- then
+  re-ran the same overlap methodology against real open-domain queries,
+  one per repo this time (`benchmark_finetuned_vs_stock_29.py`, 31
+  queries): **0.8/10 average top-10 overlap (8%), 2/31 top-1 exact match
+  (6%)** -- consistent with the original 15-repo result (5%/0%), not an
+  artifact of too little training data. Manually inspected several
+  results, not just the aggregate number: the fine-tune's failures are
+  often actively worse than "different," not just non-overlapping --
+  e.g. redis "expire a key" stock correctly surfaces the real `src/db.c`
+  implementation, fine-tune returns unrelated Symfony PHP Redis lock/
+  semaphore classes (wrong repo, wrong language); pytest "discover test
+  functions" stock finds real `_pytest/main.py`, fine-tune finds
+  scikit-learn's `discovery.py` (wrong repo). High self-retrieval
+  accuracy and low real-query overlap coexisting twice now, at two
+  different corpus sizes, is itself the finding: self-retrieval measures
+  something this fine-tuning approach is good at that isn't the thing
+  the product actually needs.
 - One fixed credit package ($5/50,000 credits, i.e. 0.01 cent/search) --
   no tiers, no subscriptions. Priced to clearly undercut the token cost a
   search saves (see billing.py's comment for the reasoning: OBSERVE's own
