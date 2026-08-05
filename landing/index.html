@@ -1,5 +1,5 @@
-<title>OBSERVE — semantic code search and agentic commerce, priced for machines</title>
-<meta name="description" content="Pay-per-query semantic code search over curated open source repositories, plus ACP-compatible buyer/seller discovery for AI agents. Priced under what it saves. Built for agents, not people clicking through a pricing page." />
+<title>OBSERVE — cross-merchant discovery and reputation for AI agent commerce</title>
+<meta name="description" content="A real ACP and Google UCP compatible marketplace layer for AI buyer-agents: sellers list for free, buyers search by intent, and a two-sided reputation system means trust is earned agreement, not a self-report. Also includes pay-per-query semantic code search over real open source repositories." />
 
 <style>
   :root {
@@ -374,29 +374,229 @@
   <div class="wrap">
     <div class="eyebrow">
       <span class="trit-glyph"><span class="on"></span><span></span><span class="on"></span></span>
-      OBSERVE Search API
+      OBSERVE API
     </div>
-    <h1 class="display">Semantic code search,<br /><em>priced for machines.</em></h1>
+    <h1 class="display">Cross-merchant discovery,<br /><em>with reputation that isn't self-reported.</em></h1>
     <p class="lede">
-      Pay-per-query search over a curated set of real open source repositories —
-      React, Django, NumPy, Tokio, Rails, Spring Boot, and two dozen more, plus
-      on-demand indexing of any repo you point it at. An API key, a prepaid
-      balance, and a single endpoint. No approval queue between "buy credits"
-      and "start querying." The same account now also reaches an
-      <a href="#commerce">ACP-compatible commerce API</a> — AI-agent buyers
-      routed to real sellers, never touching a payment.
+      The Agentic Commerce Protocol (OpenAI + Stripe) and Google's UCP
+      both define checkout between a buyer-agent and one already-known
+      merchant — neither defines how a buyer-agent finds sellers across
+      many merchants, or decides whether to trust one it's never dealt
+      with before. This is a real, working implementation of that
+      missing layer: sellers list for free, buyer-agents search by
+      intent, and a shared <span class="mono">match_id</span> lets both
+      disconnected sides independently confirm what actually happened —
+      so a buyer's trust tier is earned agreement, not a self-report.
+      The same account also reaches a
+      <a href="#positioning">semantic code search API</a> over real open
+      source repositories.
     </p>
     <div class="hero-actions">
-      <a class="btn btn-solid" href="#pricing">See pricing</a>
-      <a class="btn btn-line" href="#integrate">Read the API</a>
-      <a class="btn btn-line" href="#commerce">Agentic commerce →</a>
+      <a class="btn btn-solid" href="#walkthrough">See the live flow</a>
+      <a class="btn btn-line" href="#pricing">Get an API key</a>
+      <a class="btn btn-line" href="#positioning">Code search too →</a>
     </div>
   </div>
 </header>
 
+<section id="commerce">
+  <div class="wrap">
+    <p class="kicker">Agent commerce</p>
+    <h2 class="display">Routes AI-agent buyers to real sellers. Never touches a payment.</h2>
+    <p class="body-copy">
+      The <a href="https://github.com/agentic-commerce-protocol/agentic-commerce-protocol">Agentic Commerce Protocol</a>
+      (OpenAI + Stripe) defines checkout between one buyer-agent and one
+      already-known merchant — its own spec has no seller_id field at
+      all, and explicitly leaves multi-seller discovery to "the
+      marketplace layer above this API." That layer doesn't really
+      exist yet as a standard. This is a real, working implementation
+      of it: a seller registers a real ACP <span class="mono">checkout_session_url</span>
+      and a listing feed; a buyer-agent describes what it wants in
+      plain language; matching reuses this same search engine. The
+      match returned is the seller's own endpoint — the buyer's agent
+      calls it directly to actually transact. This service never sees
+      payment credentials, never proxies checkout, never holds funds.
+    </p>
+    <p class="body-copy">
+      Google didn't join ACP — it built a separate, non-interoperable
+      standard (<a href="https://ucp.dev/">Universal Commerce Protocol</a>,
+      launched 2026-01-11 with Shopify/Etsy/Wayfair/Target/Walmart).
+      Read directly from its real spec: it has the exact same gap ACP
+      does, no cross-merchant discovery defined either. Same fix,
+      second protocol — this catalog is also a real UCP business
+      (<span class="mono">/.well-known/ucp</span>, <span class="mono">/ucp/catalog/search</span>),
+      reusing the identical search underneath, not a second
+      implementation. See the full walkthrough below.
+    </p>
+    <div class="overflow-x">
+      <table class="datasheet">
+        <thead>
+          <tr><th>Metric</th><th>Result</th><th>Basis</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Search latency, 20,000 listings</td>
+            <td class="mono stat">48.4ms <span class="stat-sub">was 32.7s</span></td>
+            <td class="stat-sub">Real load test, before/after a FAISS rewrite — 677× faster, same data</td>
+          </tr>
+          <tr>
+            <td>Search latency, 100,000 listings</td>
+            <td class="mono stat">63.1ms</td>
+            <td class="stat-sub">5× more data, ~1.3× slower — sub-linear, not just faster once</td>
+          </tr>
+          <tr>
+            <td>Cost per search</td>
+            <td class="mono stat">$0.0001</td>
+            <td class="stat-sub">5×–17× cheaper than Algolia's published $0.0005–$0.00175/search</td>
+          </tr>
+          <tr>
+            <td>Cost to list a product</td>
+            <td class="mono stat">$0</td>
+            <td class="stat-sub">Matches OpenAI's own ACP model — merchant discovery is free there too</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      Ranking also learns: a real Spikeling spiking-neuron network (not
+      a counter) gives each buyer key its own memory of which listings
+      keep getting returned or actually purchased, persisted across
+      restarts. Two real bugs were caught by testing this against the
+      live server rather than only a mocked suite — one where a strong
+      "confirmed purchase" signal could self-erase via the same
+      threshold-crossing mechanism that makes the neuron fire — both
+      fixed and now covered by regression tests. Honestly disclosed,
+      not hidden: purchase feedback is self-reported by the buyer's own
+      agent, not independently verified against the seller's real
+      transaction, since this service deliberately never sees it.
+    </p>
+    <div class="terminal mono" style="margin-top:24px;">
+      <div class="line"><span class="comment"># register a seller (free) and search as a buyer</span></div>
+      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.online/v1/commerce/sellers \</div>
+      <div class="line">    -H "Authorization: Bearer obs_..." \</div>
+      <div class="line">    -d '{"name":"Trailhead Outfitters","checkout_session_url":"https://.../checkout_sessions"}'</div>
+      <div class="line">&nbsp;</div>
+      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.online/v1/commerce/search \</div>
+      <div class="line">    -H "Authorization: Bearer obs_..." \</div>
+      <div class="line">    -d '{"intent":"waterproof boots for a muddy trail"}'</div>
+    </div>
+    <p class="body-copy" style="margin-top:20px;">
+      OBSERVE lists itself in its own marketplace, too — not a demo
+      fixture, a real seller row. Search <span class="mono">/v1/commerce/search</span>
+      for something like "semantic code search API for AI agents" and
+      OBSERVE's own listing comes back as a real match, with a real
+      <span class="mono">checkout_session_url</span>
+      (<span class="mono">/v1/commerce/checkout_sessions</span>) that
+      creates an account and a live Stripe checkout session when a
+      buyer-agent calls it — the same mechanism every other seller on
+      this marketplace uses, applied to this product itself.
+    </p>
+    <p class="body-copy">
+      See the full flow below — discovery through a real trust network,
+      the same catalog reachable from a second protocol entirely.
+    </p>
+  </div>
+</section>
+
+<section id="walkthrough">
+  <div class="wrap">
+    <p class="kicker">Everything above, working together</p>
+    <h2 class="display">One real flow: search, sell, buy, confirm, trust — and it's reachable two ways.</h2>
+    <p class="body-copy">
+      Every call below is real and runs against the actual live API —
+      not illustrative pseudo-output. Same account, same credit balance,
+      start to finish.
+    </p>
+
+    <p class="body-copy" style="margin-top:28px;"><strong>1. Sign up once.</strong> Free trial credits, no payment needed to start.</p>
+    <div class="terminal mono">
+      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.online/v1/signup \</div>
+      <div class="line">    -d '{"email":"you@example.com"}'</div>
+      <div class="line">&nbsp;</div>
+      <div class="line"><span class="comment">→ {"api_key":"obs_...", "checkout_url":"...", "note":"100 free trial credits"}</span></div>
+    </div>
+
+    <p class="body-copy" style="margin-top:28px;"><strong>2. A seller lists a product — free.</strong> Their own real ACP checkout endpoint, nothing else.</p>
+    <div class="terminal mono">
+      <div class="line"><span class="prompt">$</span> observe commerce-register-seller "Trailhead Outfitters" "https://trailhead.example.com/checkout_sessions"</div>
+      <div class="line"><span class="comment">→ Registered seller_id=1</span></div>
+      <div class="line">&nbsp;</div>
+      <div class="line"><span class="prompt">$</span> observe commerce-add-listings 1 '[{"item_id":"boots-1","name":"Waterproof Hiking Boots","description":"Rugged waterproof boots for muddy trails","unit_amount":12000}]'</div>
+      <div class="line"><span class="comment">→ Added 1 listing(s).</span></div>
+    </div>
+
+    <p class="body-copy" style="margin-top:28px;"><strong>3. A buyer-agent describes what it wants.</strong> Real semantic ranking, plus a real <span class="mono">match_id</span> for what happens next.</p>
+    <div class="terminal mono">
+      <div class="line"><span class="prompt">$</span> observe commerce-search "waterproof boots for a muddy trail"</div>
+      <div class="line"><span class="comment">→ [Trailhead Outfitters (seller_id=1)] Waterproof Hiking Boots — 120.00 usd (score 0.94)</span></div>
+      <div class="line"><span class="comment">  checkout: https://trailhead.example.com/checkout_sessions  item_id=boots-1  match_id=1a75e62e-...</span></div>
+    </div>
+
+    <p class="body-copy" style="margin-top:28px;"><strong>4. The buyer's agent completes the purchase directly with the seller</strong> (this API is never in that call — see above), then reports back what happened.</p>
+    <div class="terminal mono">
+      <div class="line"><span class="prompt">$</span> observe commerce-feedback 1 boots-1 purchased --match-id 1a75e62e-...</div>
+      <div class="line"><span class="comment">→ Recorded and reinforced -- this listing's learned affinity for your key just grew from real ground truth.</span></div>
+    </div>
+
+    <p class="body-copy" style="margin-top:28px;"><strong>5. The seller independently confirms the same real event.</strong> This is what makes the trust network real instead of self-reported: two disconnected parties, one shared <span class="mono">match_id</span>, agreeing.</p>
+    <div class="terminal mono">
+      <div class="line"><span class="prompt">$</span> observe commerce-seller-feedback 1a75e62e-... fulfilled --rating 5</div>
+      <div class="line"><span class="comment">→ Recorded. Contributes to the buyer key's reputation tier.</span></div>
+    </div>
+
+    <p class="body-copy" style="margin-top:28px;"><strong>6. The buyer's tier is now real, earned history</strong> — a buyer's own "purchased" claims alone can never reach <span class="mono">verified</span>; only independent seller confirmation gets there. One real dispute resets a key straight back to <span class="mono">new</span>.</p>
+    <div class="terminal mono">
+      <div class="line"><span class="prompt">$</span> observe commerce-reputation</div>
+      <div class="line"><span class="comment">→ Tier: trusted</span></div>
+      <div class="line"><span class="comment">  Buyer-confirmed purchases: 1   Seller-confirmed fulfillments: 1   Disputes: 0</span></div>
+      <div class="line">&nbsp;</div>
+      <div class="line"><span class="comment"># and any seller can check an incoming buyer the same way, without seeing their identity:</span></div>
+      <div class="line"><span class="prompt">$</span> observe commerce-verify-match 1a75e62e-...</div>
+      <div class="line"><span class="comment">→ Tier: trusted   Seller-confirmed fulfillments: 1   Disputes: 0</span></div>
+    </div>
+
+    <p class="body-copy" style="margin-top:28px;"><strong>7. The whole network's health is public</strong> — no key needed, nothing individually identifiable.</p>
+    <div class="terminal mono">
+      <div class="line"><span class="prompt">$</span> curl https://api.observe-search.online/v1/commerce/network-stats</div>
+      <div class="line"><span class="comment">→ {"total_agents":1,"verified_agents":0,"trusted_agents":1,"total_matches":1,"total_confirmed_transactions":1,"total_disputes":0}</span></div>
+    </div>
+
+    <p class="body-copy" style="margin-top:28px;"><strong>8. The exact same catalog is also a real Google UCP business</strong> — a second, non-interoperable protocol, same listings, no separate integration.</p>
+    <div class="terminal mono">
+      <div class="line"><span class="prompt">$</span> curl https://api.observe-search.online/.well-known/ucp</div>
+      <div class="line"><span class="comment">→ {"ucp":{"version":"2026-04-08","services":{"dev.ucp.shopping":[{"transport":"rest","endpoint":".../ucp"}]},</span></div>
+      <div class="line"><span class="comment">           "capabilities":{"dev.ucp.shopping.catalog.search":[...]},"payment_handlers":{}}}</span></div>
+      <div class="line">&nbsp;</div>
+      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.online/ucp/catalog/search \</div>
+      <div class="line">    -H "X-Api-Key: obs_..." -d '{"query":"waterproof boots for a muddy trail"}'</div>
+      <div class="line"><span class="comment">→ {"ucp":{"version":"2026-04-08","status":"success"},</span></div>
+      <div class="line"><span class="comment">   "products":[{"id":"1:boots-1","title":"Waterproof Hiking Boots","price_range":{"min":{"amount":12000,"currency":"USD"},...}}]}</span></div>
+    </div>
+
+    <p class="body-copy" style="margin-top:28px;"><strong>9. OBSERVE itself is a seller in this same marketplace.</strong> A buyer-agent that searches for what this product does finds this product, and can complete a real purchase through the same mechanism above.</p>
+    <div class="terminal mono">
+      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.online/v1/commerce/search \</div>
+      <div class="line">    -H "Authorization: Bearer obs_..." -d '{"intent":"semantic code search API for my AI agent"}'</div>
+      <div class="line"><span class="comment">→ [OBSERVE Search API] OBSERVE credits (50,000) -- score 0.74, checkout_session_url=.../v1/commerce/checkout_sessions</span></div>
+      <div class="line">&nbsp;</div>
+      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.online/v1/commerce/checkout_sessions \</div>
+      <div class="line">    -d '{"item_id":"observe-credits","email":"agent@example.com"}'</div>
+      <div class="line"><span class="comment">→ {"checkout_url":"https://checkout.stripe.com/...","api_key":"obs_...","status":"requires_payment"}</span></div>
+    </div>
+
+    <p class="note" style="margin-top:28px;">
+      Same account, same listings, same learned trust — reachable as
+      code search, ACP commerce, UCP commerce, CLI, MCP, A2A, LangChain,
+      or CrewAI, because every one of those is a thin layer over the
+      exact same underlying search/rank/reputation logic, not seven
+      separate implementations that could drift from each other.
+    </p>
+  </div>
+</section>
+
 <section id="positioning">
   <div class="wrap">
-    <p class="kicker">When to reach for this</p>
+    <p class="kicker">Also included — semantic code search</p>
     <h2 class="display">Grep still wins when you know the name.</h2>
     <p class="body-copy">
       This exists for the other case: when a caller can only <em>describe</em>
@@ -487,14 +687,18 @@
     </div>
     <p class="note">
       These are the numbers for what's actually deployed, not a best-case
-      variant. Two upgrades were tried and specifically rejected after
+      variant. Three upgrades were tried and specifically rejected after
       measuring worse on real retrieval: a fine-tuned version of the model
       (92%/96% on the rows above, but that's after real bug fixes to the
       training pipeline, not a first attempt gone wrong — it still measured
-      worse than stock) and ternary-quantizing the index (19.9× smaller, but
-      a 40% top-1 flip rate on this corpus). Both are real, working
-      capabilities of the underlying OBSERVE engine; neither made search
-      results better here, so neither shipped.
+      worse than stock), ternary-quantizing the index (19.9× smaller, but
+      a 40% top-1 flip rate on this corpus), and a definition-vs-reference
+      reranking boost modeled on a competing tool's approach (2 wins / 3
+      regressions / 15 ties — the regressions were the same cross-repo
+      contamination failure mode an earlier rejected fusion method had).
+      All three are real, working experiments; none made search results
+      better here, so none shipped — see the README for the full
+      writeup of each.
     </p>
   </div>
 </section>
@@ -517,179 +721,6 @@
   </div>
 </section>
 
-<section id="commerce">
-  <div class="wrap">
-    <p class="kicker">New — agentic commerce</p>
-    <h2 class="display">Also routes AI-agent buyers to real sellers. Never touches a payment.</h2>
-    <p class="body-copy">
-      The <a href="https://github.com/agentic-commerce-protocol/agentic-commerce-protocol">Agentic Commerce Protocol</a>
-      (OpenAI + Stripe) defines checkout between one buyer-agent and one
-      already-known merchant — its own spec has no seller_id field at
-      all, and explicitly leaves multi-seller discovery to "the
-      marketplace layer above this API." That layer doesn't really
-      exist yet as a standard. This is a real, working implementation
-      of it: a seller registers a real ACP <span class="mono">checkout_session_url</span>
-      and a listing feed; a buyer-agent describes what it wants in
-      plain language; matching reuses this same search engine. The
-      match returned is the seller's own endpoint — the buyer's agent
-      calls it directly to actually transact. This service never sees
-      payment credentials, never proxies checkout, never holds funds.
-    </p>
-    <p class="body-copy">
-      Google didn't join ACP — it built a separate, non-interoperable
-      standard (<a href="https://ucp.dev/">Universal Commerce Protocol</a>,
-      launched 2026-01-11 with Shopify/Etsy/Wayfair/Target/Walmart).
-      Read directly from its real spec: it has the exact same gap ACP
-      does, no cross-merchant discovery defined either. Same fix,
-      second protocol — this catalog is also a real UCP business
-      (<span class="mono">/.well-known/ucp</span>, <span class="mono">/ucp/catalog/search</span>),
-      reusing the identical search underneath, not a second
-      implementation. See the full walkthrough below.
-    </p>
-    <div class="overflow-x">
-      <table class="datasheet">
-        <thead>
-          <tr><th>Metric</th><th>Result</th><th>Basis</th></tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td>Search latency, 20,000 listings</td>
-            <td class="mono stat">48.4ms <span class="stat-sub">was 32.7s</span></td>
-            <td class="stat-sub">Real load test, before/after a FAISS rewrite — 677× faster, same data</td>
-          </tr>
-          <tr>
-            <td>Search latency, 100,000 listings</td>
-            <td class="mono stat">63.1ms</td>
-            <td class="stat-sub">5× more data, ~1.3× slower — sub-linear, not just faster once</td>
-          </tr>
-          <tr>
-            <td>Cost per search</td>
-            <td class="mono stat">$0.0001</td>
-            <td class="stat-sub">5×–17× cheaper than Algolia's published $0.0005–$0.00175/search</td>
-          </tr>
-          <tr>
-            <td>Cost to list a product</td>
-            <td class="mono stat">$0</td>
-            <td class="stat-sub">Matches OpenAI's own ACP model — merchant discovery is free there too</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-    <p class="note">
-      Ranking also learns: a real Spikeling spiking-neuron network (not
-      a counter) gives each buyer key its own memory of which listings
-      keep getting returned or actually purchased, persisted across
-      restarts. Two real bugs were caught by testing this against the
-      live server rather than only a mocked suite — one where a strong
-      "confirmed purchase" signal could self-erase via the same
-      threshold-crossing mechanism that makes the neuron fire — both
-      fixed and now covered by regression tests. Honestly disclosed,
-      not hidden: purchase feedback is self-reported by the buyer's own
-      agent, not independently verified against the seller's real
-      transaction, since this service deliberately never sees it.
-    </p>
-    <div class="terminal mono" style="margin-top:24px;">
-      <div class="line"><span class="comment"># register a seller (free) and search as a buyer</span></div>
-      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.online/v1/commerce/sellers \</div>
-      <div class="line">    -H "Authorization: Bearer obs_..." \</div>
-      <div class="line">    -d '{"name":"Trailhead Outfitters","checkout_session_url":"https://.../checkout_sessions"}'</div>
-      <div class="line">&nbsp;</div>
-      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.online/v1/commerce/search \</div>
-      <div class="line">    -H "Authorization: Bearer obs_..." \</div>
-      <div class="line">    -d '{"intent":"waterproof boots for a muddy trail"}'</div>
-    </div>
-    <p class="body-copy" style="margin-top:20px;">
-      See the full flow below — discovery through a real trust network,
-      the same catalog reachable from a second protocol entirely.
-    </p>
-  </div>
-</section>
-
-<section id="walkthrough">
-  <div class="wrap">
-    <p class="kicker">Everything above, working together</p>
-    <h2 class="display">One real flow: search, sell, buy, confirm, trust — and it's reachable two ways.</h2>
-    <p class="body-copy">
-      Every call below is real and runs against the actual live API —
-      not illustrative pseudo-output. Same account, same credit balance,
-      start to finish.
-    </p>
-
-    <p class="body-copy" style="margin-top:28px;"><strong>1. Sign up once.</strong> Free trial credits, no payment needed to start.</p>
-    <div class="terminal mono">
-      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.online/v1/signup \</div>
-      <div class="line">    -d '{"email":"you@example.com"}'</div>
-      <div class="line">&nbsp;</div>
-      <div class="line"><span class="comment">→ {"api_key":"obs_...", "checkout_url":"...", "note":"100 free trial credits"}</span></div>
-    </div>
-
-    <p class="body-copy" style="margin-top:28px;"><strong>2. A seller lists a product — free.</strong> Their own real ACP checkout endpoint, nothing else.</p>
-    <div class="terminal mono">
-      <div class="line"><span class="prompt">$</span> observe commerce-register-seller "Trailhead Outfitters" "https://trailhead.example.com/checkout_sessions"</div>
-      <div class="line"><span class="comment">→ Registered seller_id=1</span></div>
-      <div class="line">&nbsp;</div>
-      <div class="line"><span class="prompt">$</span> observe commerce-add-listings 1 '[{"item_id":"boots-1","name":"Waterproof Hiking Boots","description":"Rugged waterproof boots for muddy trails","unit_amount":12000}]'</div>
-      <div class="line"><span class="comment">→ Added 1 listing(s).</span></div>
-    </div>
-
-    <p class="body-copy" style="margin-top:28px;"><strong>3. A buyer-agent describes what it wants.</strong> Real semantic ranking, plus a real <span class="mono">match_id</span> for what happens next.</p>
-    <div class="terminal mono">
-      <div class="line"><span class="prompt">$</span> observe commerce-search "waterproof boots for a muddy trail"</div>
-      <div class="line"><span class="comment">→ [Trailhead Outfitters (seller_id=1)] Waterproof Hiking Boots — 120.00 usd (score 0.94)</span></div>
-      <div class="line"><span class="comment">  checkout: https://trailhead.example.com/checkout_sessions  item_id=boots-1  match_id=1a75e62e-...</span></div>
-    </div>
-
-    <p class="body-copy" style="margin-top:28px;"><strong>4. The buyer's agent completes the purchase directly with the seller</strong> (this API is never in that call — see above), then reports back what happened.</p>
-    <div class="terminal mono">
-      <div class="line"><span class="prompt">$</span> observe commerce-feedback 1 boots-1 purchased --match-id 1a75e62e-...</div>
-      <div class="line"><span class="comment">→ Recorded and reinforced -- this listing's learned affinity for your key just grew from real ground truth.</span></div>
-    </div>
-
-    <p class="body-copy" style="margin-top:28px;"><strong>5. The seller independently confirms the same real event.</strong> This is what makes the trust network real instead of self-reported: two disconnected parties, one shared <span class="mono">match_id</span>, agreeing.</p>
-    <div class="terminal mono">
-      <div class="line"><span class="prompt">$</span> observe commerce-seller-feedback 1a75e62e-... fulfilled --rating 5</div>
-      <div class="line"><span class="comment">→ Recorded. Contributes to the buyer key's reputation tier.</span></div>
-    </div>
-
-    <p class="body-copy" style="margin-top:28px;"><strong>6. The buyer's tier is now real, earned history</strong> — a buyer's own "purchased" claims alone can never reach <span class="mono">verified</span>; only independent seller confirmation gets there. One real dispute resets a key straight back to <span class="mono">new</span>.</p>
-    <div class="terminal mono">
-      <div class="line"><span class="prompt">$</span> observe commerce-reputation</div>
-      <div class="line"><span class="comment">→ Tier: trusted</span></div>
-      <div class="line"><span class="comment">  Buyer-confirmed purchases: 1   Seller-confirmed fulfillments: 1   Disputes: 0</span></div>
-      <div class="line">&nbsp;</div>
-      <div class="line"><span class="comment"># and any seller can check an incoming buyer the same way, without seeing their identity:</span></div>
-      <div class="line"><span class="prompt">$</span> observe commerce-verify-match 1a75e62e-...</div>
-      <div class="line"><span class="comment">→ Tier: trusted   Seller-confirmed fulfillments: 1   Disputes: 0</span></div>
-    </div>
-
-    <p class="body-copy" style="margin-top:28px;"><strong>7. The whole network's health is public</strong> — no key needed, nothing individually identifiable.</p>
-    <div class="terminal mono">
-      <div class="line"><span class="prompt">$</span> curl https://api.observe-search.online/v1/commerce/network-stats</div>
-      <div class="line"><span class="comment">→ {"total_agents":1,"verified_agents":0,"trusted_agents":1,"total_matches":1,"total_confirmed_transactions":1,"total_disputes":0}</span></div>
-    </div>
-
-    <p class="body-copy" style="margin-top:28px;"><strong>8. The exact same catalog is also a real Google UCP business</strong> — a second, non-interoperable protocol, same listings, no separate integration.</p>
-    <div class="terminal mono">
-      <div class="line"><span class="prompt">$</span> curl https://api.observe-search.online/.well-known/ucp</div>
-      <div class="line"><span class="comment">→ {"ucp":{"version":"2026-04-08","services":{"dev.ucp.shopping":[{"transport":"rest","endpoint":".../ucp"}]},</span></div>
-      <div class="line"><span class="comment">           "capabilities":{"dev.ucp.shopping.catalog.search":[...]},"payment_handlers":{}}}</span></div>
-      <div class="line">&nbsp;</div>
-      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.online/ucp/catalog/search \</div>
-      <div class="line">    -H "X-Api-Key: obs_..." -d '{"query":"waterproof boots for a muddy trail"}'</div>
-      <div class="line"><span class="comment">→ {"ucp":{"version":"2026-04-08","status":"success"},</span></div>
-      <div class="line"><span class="comment">   "products":[{"id":"1:boots-1","title":"Waterproof Hiking Boots","price_range":{"min":{"amount":12000,"currency":"USD"},...}}]}</span></div>
-    </div>
-
-    <p class="note" style="margin-top:28px;">
-      Same account, same listings, same learned trust — reachable as
-      code search, ACP commerce, UCP commerce, CLI, MCP, A2A, LangChain,
-      or CrewAI, because every one of those is a thin layer over the
-      exact same underlying search/rank/reputation logic, not seven
-      separate implementations that could drift from each other.
-    </p>
-  </div>
-</section>
-
 <section id="pricing">
   <div class="wrap">
     <p class="kicker">Pricing</p>
@@ -702,19 +733,23 @@
       </div>
     </div>
     <p class="body-copy">
-      A search's own marginal compute cost is close to zero — one embedding
-      and a matrix multiply against a model that's already warm in memory.
-      The real constraint isn't infrastructure, it's whether querying beats
-      the token cost of not querying. At typical model API pricing, a few
+      The same credit balance covers both code search and commerce
+      search — one account, one price. A search's own marginal compute
+      cost is close to zero — one embedding and a matrix multiply
+      against a model that's already warm in memory. The real
+      constraint isn't infrastructure, it's whether querying beats the
+      token cost of not querying. At typical model API pricing, a few
       thousand tokens saved is worth a fraction of a cent — so the price
       per call is set to clearly undercut that, not to price the compute.
     </p>
     <p class="body-copy">
       New keys start with a small free trial balance, so you can run real
-      queries before buying credits. Indexing a repo of your own via
-      <span class="mono">/v1/private/index</span> costs substantially more
-      per repo than a single search — it's a real one-time compute cost
-      (cloning and embedding an entire codebase), not a marginal query.
+      queries before buying credits. Listing a product in the commerce
+      marketplace is free, same as OpenAI's own ACP model. Indexing a
+      repo of your own via <span class="mono">/v1/private/index</span>
+      costs substantially more per repo than a single search — it's a
+      real one-time compute cost (cloning and embedding an entire
+      codebase), not a marginal query.
     </p>
 
     <form class="signup-form" id="signup-form">
@@ -735,19 +770,19 @@
       <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.online/v1/signup \</div>
       <div class="line">    -d '{"email":"you@example.com"}'</div>
       <div class="line">&nbsp;</div>
-      <div class="line"><span class="comment"># 2. search</span></div>
-      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.online/v1/search \</div>
+      <div class="line"><span class="comment"># 2. search commerce listings, or code -- same key, same endpoint shape</span></div>
+      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.online/v1/commerce/search \</div>
       <div class="line">    -H "Authorization: Bearer obs_..." \</div>
-      <div class="line">    -d '{"query":"retry logic for a failed upload","repo":"axios"}'</div>
+      <div class="line">    -d '{"intent":"waterproof boots for a muddy trail"}'</div>
     </div>
     <div class="integrations">
+      <span class="pill">ACP — /v1/commerce buyer/seller discovery</span>
+      <span class="pill">UCP — /.well-known/ucp + /ucp/catalog/search</span>
       <span class="pill">CLI — <span class="mono">observe</span> command, any shell</span>
       <span class="pill">MCP server — Claude Code, Claude Desktop, Cursor</span>
       <span class="pill">LangChain tool</span>
       <span class="pill">CrewAI tool</span>
       <span class="pill">A2A — agent card + message:send</span>
-      <span class="pill">ACP — /v1/commerce buyer/seller discovery</span>
-      <span class="pill">UCP — /.well-known/ucp + /ucp/catalog/search</span>
       <span class="pill">Raw HTTP — any language</span>
     </div>
   </div>
@@ -758,11 +793,11 @@
     <div>
       <div class="eyebrow" style="margin-bottom:10px;">
         <span class="trit-glyph"><span class="on"></span><span></span><span class="on"></span></span>
-        OBSERVE Search API
+        OBSERVE API
       </div>
       <a class="btn btn-solid" href="#pricing">Get an API key</a>
     </div>
-    <p class="foot-note">Built on OBSERVE, a local-first semantic code search engine, now also an ACP-compatible commerce discovery layer. Every claim on this page traces to a reproducible benchmark, not a projection.</p>
+    <p class="foot-note">A real ACP and UCP-compatible agent commerce discovery and reputation layer, with semantic code search over open source built into the same account. Every claim on this page traces to a reproducible benchmark, not a projection.</p>
   </div>
 </footer>
 
