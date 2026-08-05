@@ -73,6 +73,16 @@ def test_credits_per_private_index_env_var_actually_changes_deduction(env_overri
     assert server.CREDITS_PER_PRIVATE_INDEX == 999
 
 
+def test_credits_per_commerce_search_is_independent_of_code_search_pricing(env_override):
+    """Real regression this guards against: commerce search used to
+    silently reuse CREDITS_PER_SEARCH -- changing code-search pricing
+    would have moved commerce pricing too, without anyone intending
+    that. Now a dedicated env var."""
+    env_override("OBSERVE_CREDITS_PER_COMMERCE_SEARCH", "3", server)
+    assert server.CREDITS_PER_COMMERCE_SEARCH == 3
+    assert server.CREDITS_PER_SEARCH != 3
+
+
 def test_model_path_env_var_is_actually_read(env_override):
     env_override("OBSERVE_MODEL_PATH", "sentence-transformers/all-mpnet-base-v2", server)
     assert server.MODEL_PATH == "sentence-transformers/all-mpnet-base-v2"

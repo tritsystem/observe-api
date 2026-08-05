@@ -250,6 +250,42 @@ Grounded in what's actually built and tested above, not aspiration:
   the fine-tuning and quantization negative results elsewhere in this
   README) applied to a new surface.
 
+### Cheap, checked against real published competitor pricing, not asserted
+
+- **Sellers pay nothing to be discoverable.** `POST /v1/commerce/sellers`
+  and `POST /v1/commerce/sellers/{id}/listings` charge zero credits --
+  confirmed by reading the actual code (no `deduct_credit` call exists
+  on either path). This matches the real ACP ecosystem's own established
+  norm, not a guess: OpenAI's own ACP model keeps merchant product
+  discovery/visibility in ChatGPT Shopping free, charging nothing for a
+  business to be listed. Charging sellers to be found would work against
+  the exact market this is built for.
+- **Buyer search pricing, checked against a real comparable, not
+  invented**: `OBSERVE_CREDITS_PER_COMMERCE_SEARCH` defaults to the
+  same 1-credit floor as code search ($0.0001/search at the existing
+  $5/50,000-credit pricing). The closest real comparable found via a
+  live 2026 search, Algolia's own published pricing: $0.50 per 1,000
+  searches ($0.0005/search) on its base Grow tier, rising to
+  $0.75-$1.75/1,000 ($0.00075-$0.00175/search) for AI-ranked tiers --
+  meaning this is already **5x to 17x cheaper per search** than the
+  nearest real published alternative, not a vague "cheap" claim.
+- **Decoupled from code-search pricing on purpose**
+  (`OBSERVE_CREDITS_PER_COMMERCE_SEARCH`, its own env var, not a reuse
+  of `OBSERVE_CREDITS_PER_SEARCH`) -- a real correctness fix made
+  alongside this: before, changing code-search pricing would have
+  silently moved commerce pricing too, an entanglement nobody would have
+  intended. Verified by a dedicated test
+  (`test_credits_per_commerce_search_is_independent_of_code_search_pricing`).
+- **A new key's existing signup bonus already covers trying this risk-
+  free** -- `SIGNUP_BONUS_CREDITS` (100 by default) is shared across
+  every endpoint, commerce included, so a new caller can run real
+  searches, register a seller, and test the feedback loop before ever
+  touching Stripe.
+
+*Pricing comparisons are a live snapshot from a 2026 web search at the
+time this was written -- re-verify before quoting Algolia's numbers
+anywhere durable, since third-party pricing changes without notice.*
+
 ## Honest limitations (v1, disclosed not hidden)
 
 - **Private per-tenant indexing is now built** (`tenant_index.py`,

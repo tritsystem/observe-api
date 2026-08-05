@@ -41,6 +41,15 @@ CREDITS_PER_SEARCH = int(os.environ.get("OBSERVE_CREDITS_PER_SEARCH", "1"))
 # the per-search price. Not refunded on a failed index (e.g. bad git_url) --
 # a disclosed v1 simplification, not an oversight.
 CREDITS_PER_PRIVATE_INDEX = int(os.environ.get("OBSERVE_CREDITS_PER_PRIVATE_INDEX", "2000"))
+# Deliberately its own env var, not just reusing CREDITS_PER_SEARCH --
+# commerce search is a different product surface with a different real
+# cost comparison (Algolia's cheapest published tier is $0.50/1,000
+# queries = $0.0005/search; at 1 credit = $0.0001/search this is
+# already ~5x cheaper at the same unit price code search already uses).
+# Decoupled so operators can tune commerce pricing independently without
+# silently moving code-search pricing too -- 1 is the real integer-credit
+# floor already, not an arbitrary default.
+CREDITS_PER_COMMERCE_SEARCH = int(os.environ.get("OBSERVE_CREDITS_PER_COMMERCE_SEARCH", "1"))
 # Free trial credits granted at signup, before any payment -- lets a new
 # caller try a handful of real searches without hitting Stripe first. v1 has
 # no email verification (see db.create_api_key), so this is exploitable via
@@ -411,4 +420,4 @@ a2a_adapter.register_a2a_routes(app, engine, db, rate_limit, _require_key, CREDI
 # ACP-compatible buyer/seller discovery layer -- see commerce_router.py's
 # module docstring for the real, disclosed scope boundary (routing/matching
 # only, never payment or checkout itself).
-commerce_router.register_commerce_routes(app, engine, db, rate_limit, _require_key, CREDITS_PER_SEARCH)
+commerce_router.register_commerce_routes(app, engine, db, rate_limit, _require_key, CREDITS_PER_COMMERCE_SEARCH)
