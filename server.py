@@ -26,6 +26,7 @@ from pydantic import BaseModel, EmailStr
 
 import a2a_adapter
 import commerce_router
+import ucp_adapter
 import billing
 import db
 import rate_limit
@@ -420,4 +421,10 @@ a2a_adapter.register_a2a_routes(app, engine, db, rate_limit, _require_key, CREDI
 # ACP-compatible buyer/seller discovery layer -- see commerce_router.py's
 # module docstring for the real, disclosed scope boundary (routing/matching
 # only, never payment or checkout itself).
-commerce_router.register_commerce_routes(app, engine, db, rate_limit, _require_key, CREDITS_PER_COMMERCE_SEARCH)
+_do_commerce_search = commerce_router.register_commerce_routes(app, engine, db, rate_limit, _require_key, CREDITS_PER_COMMERCE_SEARCH)
+
+# Publishes the same aggregated catalog as a real UCP business -- see
+# ucp_adapter.py's module docstring for why this is a separate protocol
+# from ACP (not an extension of it) and what's disclosed as not yet
+# implemented (HTTP Message Signatures).
+ucp_adapter.register_ucp_routes(app, engine, db, rate_limit, _require_key, CREDITS_PER_COMMERCE_SEARCH, _do_commerce_search)

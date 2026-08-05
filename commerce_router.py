@@ -371,23 +371,19 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
         commerce_index.add(row_ids, vecs)
         return ListingsAddResponse(added=len(req.listings))
 
-    @app.post("/v1/commerce/search", response_model=CommerceSearchResponse)
-    def commerce_search(req: CommerceSearchRequest, authorization: Optional[str] = Header(None)):
-        raw_key = require_key_fn(authorization)
-        if not rate_limit.allow(raw_key):
-            raise HTTPException(status_code=429, detail="rate limit exceeded")
-        if not db.deduct_credit(raw_key, credits_per_search):
-            raise HTTPException(status_code=402, detail="insufficient credits")
-        if not engine.ready or engine.model is None:
-            db.deduct_credit(raw_key, -credits_per_search)
-            raise HTTPException(status_code=503, detail="search engine not ready yet")
-
-        qvec = engine.model.encode([req.intent], normalize_embeddings=True).astype("float32")[0]
+    def _do_commerce_search(intent: str, max_price: Optional[int], category: Optional[str], k: int, raw_key: str) -> List[CommerceMatch]:
+        """The actual search/rank/learn logic, factored out of the
+        /v1/commerce/search REST handler so ucp_adapter.py's UCP-shaped
+        catalog search can reuse it exactly instead of a second
+        implementation that could drift -- same reasoning as unifying the
+        cost guard into core.search() earlier this session. Callers own
+        their own auth/credit/rate-limit handling first; this only does
+        the search itself."""
+        qvec = engine.model.encode([intent], normalize_embeddings=True).astype("float32")[0]
         commerce_index = _get_commerce_index(qvec.shape[0])
 
         if commerce_index.ntotal == 0:
-            record = db.get_key_record(raw_key)
-            return CommerceSearchResponse(matches=[], credits_remaining=record["credits"])
+            return []
 
         # Real scale fix, measured before assuming it mattered: this used
         # to SELECT every listing matching category/price into Python and
@@ -396,17 +392,16 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
         # FAISS now generates a small candidate set directly (exact
         # cosine similarity, not approximate -- see that module for why),
         # and only THOSE rows get fetched/filtered. Over-fetches beyond
-        # req.k because category/max_price filtering happens AFTER
+        # k because category/max_price filtering happens AFTER
         # retrieval, on the candidate set, not inside the vector search
         # itself -- a real, disclosed tradeoff: a very restrictive filter
         # combined with a small candidate pool can under-return relative
         # to what technically exists in the full catalog. 10x/min-100 is
         # a judgment call, not a measurement.
-        k_candidates = max(req.k * 10, 100)
+        k_candidates = max(k * 10, 100)
         candidates = commerce_index.search(qvec, k_candidates)
         if not candidates:
-            record = db.get_key_record(raw_key)
-            return CommerceSearchResponse(matches=[], credits_remaining=record["credits"])
+            return []
 
         candidate_listing_ids = [listing_id for listing_id, _score in candidates]
         score_by_id = {listing_id: score for listing_id, score in candidates}
@@ -419,17 +414,16 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
                 f"WHERE l.id IN ({placeholders})"
             )
             params = list(candidate_listing_ids)
-            if req.category:
+            if category:
                 sql += " AND l.category = ?"
-                params.append(req.category)
-            if req.max_price is not None:
+                params.append(category)
+            if max_price is not None:
                 sql += " AND (l.unit_amount IS NULL OR l.unit_amount <= ?)"
-                params.append(req.max_price)
+                params.append(max_price)
             rows = conn.execute(sql, params).fetchall()
 
         if not rows:
-            record = db.get_key_record(raw_key)
-            return CommerceSearchResponse(matches=[], credits_remaining=record["credits"])
+            return []
 
         # score_by_id's value IS the real cosine similarity already
         # (IndexFlatIP over L2-normalized vectors == cosine, exactly the
@@ -489,7 +483,7 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
             blended.append((cosine + boost, cosine, boost, row, composite_id))
         blended.sort(key=lambda t: -t[0])
 
-        top = blended[:req.k]
+        top = blended[:k]
 
         # A real match_id per returned match -- the shared correlation
         # point the two-sided reputation system needs (see
@@ -522,6 +516,20 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
         memory.observe_search([composite_id for *_rest, composite_id in top], now_ms)
         _save_memory(key_hash, memory)
 
+        return matches
+
+    @app.post("/v1/commerce/search", response_model=CommerceSearchResponse)
+    def commerce_search(req: CommerceSearchRequest, authorization: Optional[str] = Header(None)):
+        raw_key = require_key_fn(authorization)
+        if not rate_limit.allow(raw_key):
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
+        if not db.deduct_credit(raw_key, credits_per_search):
+            raise HTTPException(status_code=402, detail="insufficient credits")
+        if not engine.ready or engine.model is None:
+            db.deduct_credit(raw_key, -credits_per_search)
+            raise HTTPException(status_code=503, detail="search engine not ready yet")
+
+        matches = _do_commerce_search(req.intent, req.max_price, req.category, req.k, raw_key)
         record = db.get_key_record(raw_key)
         return CommerceSearchResponse(matches=matches, credits_remaining=record["credits"])
 
@@ -796,3 +804,8 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
             total_matches=total_matches, total_confirmed_transactions=total_confirmed,
             total_disputes=total_disputes,
         )
+
+    # Returned so ucp_adapter.py can reuse the exact same search/rank/learn
+    # logic for its UCP-shaped catalog endpoint, instead of a second
+    # implementation that could drift from this one.
+    return _do_commerce_search
