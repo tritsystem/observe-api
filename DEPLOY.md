@@ -74,3 +74,30 @@ actually land.
 - Submit to the registries listed in `launch/registry-submissions.md`
   (requires your own GitHub/account identity on each PR/form).
 - Post the drafted Show HN / blog content in `launch/`.
+
+## 10. Ongoing operations (see `ROADMAP.md` Phase 1 for the full hardening list)
+
+- **Backups**: `backup_db.py` uses SQLite's safe live-backup API (not a
+  raw file copy, which can corrupt a WAL-mode DB mid-write), keeps 1
+  week of history. A crontab entry (`0 */6 * * *`) is already registered
+  on the host, but cron itself needs a one-time manual start:
+  `sudo service cron start`, plus `[boot] command=service cron start` in
+  `/etc/wsl.conf` so it survives a WSL restart. Verify it's actually
+  running with `service cron status` after.
+- **Health check**: `healthcheck.py [api_key]` hits real endpoints
+  (landing page, repos list, agent card, and a real search if an API key
+  is passed) -- deliberately does NOT read `server.log`, since a
+  genuinely healthy server can look permanently stuck there (a real bug
+  found this session: stdout is block-buffered when redirected to a
+  file, so a completion message can sit unflushed indefinitely). Wire
+  this into cron + an alerting channel, or an external uptime monitor
+  (healthchecks.io, BetterUptime) via "alert if this script's exit code
+  is nonzero."
+- **CI**: `.github/workflows/ci.yml` runs the test suite on every push --
+  exists locally in the repo checkout but isn't pushed yet (`gh` auth is
+  missing the `workflow` scope needed to write files under
+  `.github/workflows/`; run `gh auth refresh -h github.com -s workflow`
+  once, then commit/push that file for real). Already proved its worth
+  once even before being live: running the suite locally for the first
+  time this session caught a real regression and 2 real pre-existing
+  test/feature drift bugs.
