@@ -295,6 +295,49 @@
   .terminal .comment { color: var(--muted); }
   .terminal .prompt { color: var(--accent); }
 
+  /* ---------- Signup form ---------- */
+  .signup-form {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 28px;
+  }
+  .signup-form input[type="email"] {
+    flex: 1;
+    min-width: 220px;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    background: var(--paper);
+    color: var(--ink);
+    font-size: 0.95rem;
+  }
+  .signup-form input[type="email"]:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .signup-form button {
+    font: inherit;
+    cursor: pointer;
+  }
+  .signup-status {
+    font-size: 0.88rem;
+    color: var(--muted);
+    margin-top: 10px;
+    min-height: 1.4em;
+  }
+  .signup-key-box {
+    font-family: ui-monospace, "SF Mono", Consolas, "Roboto Mono", Menlo, monospace;
+    font-size: 0.88rem;
+    background: var(--paper-raised);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 12px 14px;
+    margin-top: 12px;
+    word-break: break-all;
+  }
+  .signup-result a.btn { margin-top: 12px; }
+
   .integrations {
     display: flex;
     gap: 10px;
@@ -673,6 +716,13 @@
       per repo than a single search — it's a real one-time compute cost
       (cloning and embedding an entire codebase), not a marginal query.
     </p>
+
+    <form class="signup-form" id="signup-form">
+      <input type="email" id="signup-email" placeholder="you@example.com" required autocomplete="email" />
+      <button type="submit" class="btn btn-solid" id="signup-submit">Get a free API key</button>
+    </form>
+    <div class="signup-status" id="signup-status"></div>
+    <div id="signup-result"></div>
   </div>
 </section>
 
@@ -715,3 +765,53 @@
     <p class="foot-note">Built on OBSERVE, a local-first semantic code search engine, now also an ACP-compatible commerce discovery layer. Every claim on this page traces to a reproducible benchmark, not a projection.</p>
   </div>
 </footer>
+
+<script>
+(function () {
+  var form = document.getElementById("signup-form");
+  if (!form) return;
+  var emailInput = document.getElementById("signup-email");
+  var submitBtn = document.getElementById("signup-submit");
+  var statusEl = document.getElementById("signup-status");
+  var resultEl = document.getElementById("signup-result");
+
+  function esc(s) {
+    var d = document.createElement("div");
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  form.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var email = emailInput.value.trim();
+    if (!email) return;
+    submitBtn.disabled = true;
+    statusEl.textContent = "Creating your API key...";
+    resultEl.innerHTML = "";
+    fetch("https://api.observe-search.online/v1/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: email })
+    })
+      .then(function (res) {
+        return res.json().then(function (data) { return { ok: res.ok, data: data }; });
+      })
+      .then(function (r) {
+        if (!r.ok) {
+          statusEl.textContent = "Signup error: " + (r.data.detail || "please try again.");
+          submitBtn.disabled = false;
+          return;
+        }
+        statusEl.textContent = "Account created — save this key now, it will not be shown again:";
+        resultEl.innerHTML =
+          '<div class="signup-key-box">' + esc(r.data.api_key) + "</div>" +
+          '<a class="btn btn-line" href="' + esc(r.data.checkout_url) + '" target="_blank" rel="noopener">Add more credits (Stripe) →</a>';
+        submitBtn.disabled = false;
+      })
+      .catch(function (err) {
+        statusEl.textContent = "Request failed: " + err.message;
+        submitBtn.disabled = false;
+      });
+  });
+})();
+</script>
