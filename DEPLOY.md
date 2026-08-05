@@ -4,8 +4,17 @@ Real, step-by-step path from "code on GitHub" to "live at a real domain."
 Nothing here is templated for illustration -- follow it in order.
 
 ## 1. Create the droplet
-DigitalOcean -> Create -> Droplets -> Ubuntu 24.04 LTS -> Basic / Regular SSD
-($6/mo is enough to start) -> add your SSH key -> Create. Note the public IP.
+DigitalOcean -> Create -> Droplets -> Ubuntu 24.04 LTS -> Basic / Regular SSD.
+**Size: 8GB RAM minimum (~$48/mo), not the $6/mo 1GB tier this doc originally
+said was "enough to start."** That was wrong -- real measurement of the live
+service (2026-08-04) found the running `uvicorn` process alone uses **5.24GB
+RSS** (`ps aux`: RSS 5242208 KB) with the real 759k-chunk FAISS index loaded,
+which is why the actual current deployment runs on kimchi's own 15GB WSL2
+host instead of the original tiny droplet -- confirmed via two real OOM kills
+during the original sizing attempt. An 8GB droplet leaves real headroom above
+that 5.24GB floor for OS overhead, Caddy, and concurrent request growth; a
+4GB droplet would be uncomfortably close to the measured floor with no
+margin. Add your SSH key -> Create. Note the public IP.
 
 ## 2. Point DNS at it
 At your domain registrar (or DO's own DNS if you moved nameservers there),
@@ -44,9 +53,11 @@ automatic Let's Encrypt TLS for `$DOMAIN`).
 ```
 docker compose exec api python index_repos.py
 ```
-Clones and embeds the ~15 curated repos. Expect this to take real minutes,
+Clones and embeds the curated repo corpus. Expect this to take real minutes,
 not seconds -- it's really cloning and really running the embedding model,
-not a canned response.
+not a canned response. **Disk note**: the real index on disk measures 1.5GB
+(`data/observe-index`, measured 2026-08-04) -- budget real disk space on the
+droplet accordingly, on top of the OS and Docker images.
 
 ## 7. Point the Stripe webhook at it
 Stripe dashboard -> Developers -> Webhooks -> Add endpoint ->
@@ -101,3 +112,12 @@ actually land.
   once even before being live: running the suite locally for the first
   time this session caught a real regression and 2 real pre-existing
   test/feature drift bugs.
+
+## Migrating off kimchi to a real cloud VM
+
+See `MIGRATE.md` for the runbook -- this section (1-9 above) describes a
+fresh deploy; migrating the *already-live* service currently running on
+kimchi's WSL2 to a properly-sized droplet without losing real customer data
+(API keys, credits, usage history) is a different, higher-stakes operation
+with its own real risks (cutover downtime, DNS propagation lag), covered
+separately.
