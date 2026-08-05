@@ -703,3 +703,27 @@ def test_network_stats_is_public_and_aggregate(client, fresh_db):
     body = resp.json()
     assert body["total_agents"] >= 1
     assert body["total_matches"] >= 1
+
+
+def test_checkout_sessions_rejects_unknown_item(client, fresh_db):
+    resp = client.post("/v1/commerce/checkout_sessions", json={"item_id": "not-a-real-item", "email": "buyer@example.com"})
+    assert resp.status_code == 404
+
+
+def test_checkout_sessions_rejects_empty_email(client, fresh_db):
+    resp = client.post("/v1/commerce/checkout_sessions", json={"item_id": "observe-credits", "email": "  "})
+    assert resp.status_code == 400
+
+
+def test_checkout_sessions_creates_a_real_working_account(client, fresh_db):
+    resp = client.post("/v1/commerce/checkout_sessions", json={"item_id": "observe-credits", "email": "newbuyer@example.com"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["checkout_url"] == "https://checkout.stripe.com/fake-session"
+    assert body["api_key"].startswith("obs_")
+    # the returned key is real and usable, not a placeholder
+    search_resp = client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {body['api_key']}"},
+    )
+    assert search_resp.status_code == 200

@@ -43,6 +43,7 @@ never breaks the actual feedback response -- archiving is a best-effort
 side effect of a real event, not a dependency of the API's own
 correctness (see commerce_feedback()'s try/except).
 """
+import os
 import time
 import uuid
 from typing import Dict, List, Optional
@@ -50,6 +51,7 @@ from typing import Dict, List, Optional
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
+import billing
 import commerce_search_index
 import commerce_spiking_memory
 import obsidian_memory
@@ -214,6 +216,32 @@ class NetworkStats(BaseModel):
         "identity is exposed here. See /v1/commerce/my-reputation for "
         "your own key's detail."
     )
+
+
+class CheckoutSessionRequest(BaseModel):
+    item_id: str
+    email: str
+
+
+class CheckoutSessionResponse(BaseModel):
+    id: str
+    status: str
+    checkout_url: str
+    api_key: str
+    note: str
+
+
+# OBSERVE's own real ACP catalog -- exactly one item, its own credit
+# package, priced identically to /v1/signup's checkout (billing.py is the
+# single source of truth for that price, not duplicated here). This is
+# what a buyer-agent gets back from a commerce_search match if OBSERVE is
+# itself registered as a seller in its own marketplace.
+_OBSERVE_CATALOG = {
+    "observe-credits": {
+        "name": f"OBSERVE API credits ({billing.PACKAGE_CREDITS:,})",
+        "unit_amount": billing.PACKAGE_PRICE_CENTS,
+    },
+}
 
 
 # Reputation tier thresholds -- judgment calls, not measurements (no real
@@ -803,6 +831,44 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
             total_agents=len(buyer_hashes), verified_agents=verified, trusted_agents=trusted,
             total_matches=total_matches, total_confirmed_transactions=total_confirmed,
             total_disputes=total_disputes,
+        )
+
+    @app.post("/v1/commerce/checkout_sessions", response_model=CheckoutSessionResponse)
+    def observe_checkout_session(req: CheckoutSessionRequest):
+        """OBSERVE's own real ACP checkout endpoint -- this is the exact
+        checkout_session_url OBSERVE registers for itself as a seller in
+        its own marketplace, so any buyer-agent that discovers OBSERVE via
+        commerce_search (searching for something like "semantic code
+        search API for agents") can complete a real purchase the same way
+        it would with any other listed seller, no separate integration.
+
+        Deliberately simplified relative to full ACP: one real item (the
+        credit package /v1/signup already sells), not an arbitrary
+        catalog, and a caller with no existing OBSERVE account gets one
+        created inline rather than needing a pre-existing key -- "wants
+        to buy OBSERVE credits" and "doesn't have an OBSERVE key yet" are
+        the same caller by definition here. Reuses billing.py's real
+        Stripe integration, not a second payment path.
+        """
+        item = _OBSERVE_CATALOG.get(req.item_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"unknown item_id -- must be one of {sorted(_OBSERVE_CATALOG)}")
+        if not req.email.strip():
+            raise HTTPException(status_code=400, detail="email must not be empty")
+        signup_bonus = int(os.environ.get("OBSERVE_SIGNUP_BONUS_CREDITS", "100"))
+        raw_key = db.create_api_key(req.email, initial_credits=signup_bonus)
+        key_hash = db.hash_key(raw_key)
+        checkout_url = billing.create_checkout_session(req.email, key_hash)
+        return CheckoutSessionResponse(
+            id=key_hash[:16],
+            status="requires_payment",
+            checkout_url=checkout_url,
+            api_key=raw_key,
+            note=(
+                f"New OBSERVE account created with {signup_bonus} free trial "
+                "credits -- save this api_key now, it is only ever shown "
+                "once. Complete checkout_url to add the paid package."
+            ),
         )
 
     # Returned so ucp_adapter.py can reuse the exact same search/rank/learn
