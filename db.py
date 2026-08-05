@@ -64,6 +64,34 @@ def init_db():
                 created_at REAL NOT NULL
             )
         """)
+        # commerce_router.py's ACP-compatible buyer/seller discovery
+        # tables -- defined here, not lazily in commerce_router.py, so
+        # they're created by the same init_db() call every other table
+        # already goes through (server.py's lifespan calls this on real
+        # startup; tests' fresh_db fixture calls it against a temp DB).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS commerce_sellers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_hash TEXT NOT NULL,
+                name TEXT NOT NULL,
+                checkout_session_url TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS commerce_listings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                seller_id INTEGER NOT NULL,
+                item_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                unit_amount INTEGER,
+                currency TEXT NOT NULL DEFAULT 'usd',
+                category TEXT,
+                embedding TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )
+        """)
 
 
 def create_api_key(email: str, initial_credits: int = 0) -> str:

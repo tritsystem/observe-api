@@ -130,6 +130,41 @@ here's how to falsify it" hint as a right one -- an agent that ran the
 suggested test on the CI.md result would immediately see the race condition
 persists, and correctly rule it out instead of citing it as the cause.
 
+## Agentic Commerce Protocol (ACP) buyer/seller routing (new)
+
+commerce_router.py adds an ACP-compatible discovery/matching layer, not
+a reimplementation of ACP checkout itself. Read directly from the real
+2026-04-17 ACP spec (github.com/agentic-commerce-protocol/agentic-commerce-protocol,
+maintained by OpenAI + Stripe): a checkout session has no seller_id or
+merchant_id field at all -- it's scoped entirely by the caller's Bearer
+token to ONE already-known merchant, and multi-seller discovery is
+explicitly left to "the marketplace layer above this API." This module
+is that layer.
+
+- `POST /v1/commerce/sellers` -- register a seller's real ACP
+  `checkout_session_url` (must be https).
+- `POST /v1/commerce/sellers/{id}/listings` -- add a listing feed
+  (short text descriptions), embedded with the same SentenceTransformer
+  already resident in memory for code search (`engine.model` -- no
+  second model load).
+- `POST /v1/commerce/search` -- a buyer-agent describes intent in
+  natural language; results are ranked by real cosine similarity
+  against listing embeddings and include each match's seller
+  `checkout_session_url` + `item_id`.
+
+**What this deliberately never does**: handle payment credentials,
+proxy the checkout call, hold funds, or act as payment provider/merchant
+of record. A match is a pointer to the seller's own real ACP endpoint --
+the buyer's agent calls it directly (`POST .../checkout_sessions` with
+the returned `item_id`, per the real spec) to actually transact. Same
+trust boundary as a search engine listing a business, not a payment
+processor's.
+
+Tested with a deterministic fake embedding model (`tests/test_commerce_router.py`)
+that verifies actual ranking behavior (a boots-related query outranks an
+unrelated listing) and per-key listing isolation, not just that
+endpoints return 200.
+
 ## Honest limitations (v1, disclosed not hidden)
 
 - **Private per-tenant indexing is now built** (`tenant_index.py`,

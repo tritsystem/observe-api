@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, EmailStr
 
 import a2a_adapter
+import commerce_router
 import billing
 import db
 import rate_limit
@@ -406,3 +407,8 @@ REPO_REGISTRY = _RepoRegistry()
 # a2a_adapter.py's module docstring for what's actually implemented (v1:
 # message:send with a plain-text query only) vs. deferred.
 a2a_adapter.register_a2a_routes(app, engine, db, rate_limit, _require_key, CREDITS_PER_SEARCH)
+
+# ACP-compatible buyer/seller discovery layer -- see commerce_router.py's
+# module docstring for the real, disclosed scope boundary (routing/matching
+# only, never payment or checkout itself).
+commerce_router.register_commerce_routes(app, engine, db, rate_limit, _require_key, CREDITS_PER_SEARCH)
