@@ -1,5 +1,5 @@
-<title>OBSERVE — semantic code search, priced for machines</title>
-<meta name="description" content="Pay-per-query semantic code search over curated open source repositories. Priced under the tokens it saves. Built for agents." />
+<title>OBSERVE — semantic code search and agentic commerce, priced for machines</title>
+<meta name="description" content="Pay-per-query semantic code search over curated open source repositories, plus ACP-compatible buyer/seller discovery for AI agents. Priced under what it saves. Built for agents, not people clicking through a pricing page." />
 
 <style>
   :root {
@@ -339,11 +339,14 @@
       React, Django, NumPy, Tokio, Rails, Spring Boot, and two dozen more, plus
       on-demand indexing of any repo you point it at. An API key, a prepaid
       balance, and a single endpoint. No approval queue between "buy credits"
-      and "start querying."
+      and "start querying." The same account now also reaches an
+      <a href="#commerce">ACP-compatible commerce API</a> — AI-agent buyers
+      routed to real sellers, never touching a payment.
     </p>
     <div class="hero-actions">
       <a class="btn btn-solid" href="#pricing">See pricing</a>
       <a class="btn btn-line" href="#integrate">Read the API</a>
+      <a class="btn btn-line" href="#commerce">Agentic commerce →</a>
     </div>
   </div>
 </header>
@@ -370,6 +373,38 @@
         <p class="body-copy" style="margin:0; font-size:0.92rem;">Vocabulary mismatch, legacy renames, concept-only queries. One call instead of several exploratory greps.</p>
       </div>
     </div>
+  </div>
+</section>
+
+<section id="how-it-works">
+  <div class="wrap">
+    <p class="kicker">How it works</p>
+    <h2 class="display">An embedding model, a real vector index, and a rerank step that admits its own limits.</h2>
+    <p class="body-copy">
+      Every repo is chunked at function boundaries (not fixed-size
+      windows), embedded with stock <span class="mono">all-MiniLM-L6-v2</span>
+      — deliberately stock: a fine-tuned variant was built and measured
+      worse on real retrieval, twice, at two different corpus sizes (see
+      the benchmarks below) — and indexed with FAISS for the actual
+      similarity search. A hybrid rerank blends BM25 lexical scoring
+      into that dense-retrieved candidate pool afterward, not a naive
+      full-corpus fusion of the two: that specific shape was chosen
+      because it preserved cases naive fusion lost to lexical noise
+      while eliminating cross-language contamination, measured against
+      the alternative, not assumed.
+    </p>
+    <p class="body-copy">
+      <span class="mono">investigate: true</span> reframes results as
+      unverified candidates with a falsification hint instead of ranked
+      answers — a semantic match is correlation with a query, not proof
+      a location causes whatever an agent is actually investigating.
+      And this isn't only reachable over raw HTTP: a real
+      <a href="https://github.com/a2aproject/A2A">A2A</a>
+      endpoint (agent card + <span class="mono">message:send</span>,
+      not just a discovery manifest) sits alongside the MCP server and
+      LangChain/CrewAI tools, so another agent can find and call this
+      one without a human wiring up the integration first.
+    </p>
   </div>
 </section>
 
@@ -439,6 +474,79 @@
   </div>
 </section>
 
+<section id="commerce">
+  <div class="wrap">
+    <p class="kicker">New — agentic commerce</p>
+    <h2 class="display">Also routes AI-agent buyers to real sellers. Never touches a payment.</h2>
+    <p class="body-copy">
+      The <a href="https://github.com/agentic-commerce-protocol/agentic-commerce-protocol">Agentic Commerce Protocol</a>
+      (OpenAI + Stripe) defines checkout between one buyer-agent and one
+      already-known merchant — its own spec has no seller_id field at
+      all, and explicitly leaves multi-seller discovery to "the
+      marketplace layer above this API." That layer doesn't really
+      exist yet as a standard. This is a real, working implementation
+      of it: a seller registers a real ACP <span class="mono">checkout_session_url</span>
+      and a listing feed; a buyer-agent describes what it wants in
+      plain language; matching reuses this same search engine. The
+      match returned is the seller's own endpoint — the buyer's agent
+      calls it directly to actually transact. This service never sees
+      payment credentials, never proxies checkout, never holds funds.
+    </p>
+    <div class="overflow-x">
+      <table class="datasheet">
+        <thead>
+          <tr><th>Metric</th><th>Result</th><th>Basis</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Search latency, 20,000 listings</td>
+            <td class="mono stat">48.4ms <span class="stat-sub">was 32.7s</span></td>
+            <td class="stat-sub">Real load test, before/after a FAISS rewrite — 677× faster, same data</td>
+          </tr>
+          <tr>
+            <td>Search latency, 100,000 listings</td>
+            <td class="mono stat">63.1ms</td>
+            <td class="stat-sub">5× more data, ~1.3× slower — sub-linear, not just faster once</td>
+          </tr>
+          <tr>
+            <td>Cost per search</td>
+            <td class="mono stat">$0.0001</td>
+            <td class="stat-sub">5×–17× cheaper than Algolia's published $0.0005–$0.00175/search</td>
+          </tr>
+          <tr>
+            <td>Cost to list a product</td>
+            <td class="mono stat">$0</td>
+            <td class="stat-sub">Matches OpenAI's own ACP model — merchant discovery is free there too</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      Ranking also learns: a real Spikeling spiking-neuron network (not
+      a counter) gives each buyer key its own memory of which listings
+      keep getting returned or actually purchased, persisted across
+      restarts. Two real bugs were caught by testing this against the
+      live server rather than only a mocked suite — one where a strong
+      "confirmed purchase" signal could self-erase via the same
+      threshold-crossing mechanism that makes the neuron fire — both
+      fixed and now covered by regression tests. Honestly disclosed,
+      not hidden: purchase feedback is self-reported by the buyer's own
+      agent, not independently verified against the seller's real
+      transaction, since this service deliberately never sees it.
+    </p>
+    <div class="terminal mono" style="margin-top:24px;">
+      <div class="line"><span class="comment"># register a seller (free) and search as a buyer</span></div>
+      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.online/v1/commerce/sellers \</div>
+      <div class="line">    -H "Authorization: Bearer obs_..." \</div>
+      <div class="line">    -d '{"name":"Trailhead Outfitters","checkout_session_url":"https://.../checkout_sessions"}'</div>
+      <div class="line">&nbsp;</div>
+      <div class="line"><span class="prompt">$</span> curl -X POST https://api.observe-search.online/v1/commerce/search \</div>
+      <div class="line">    -H "Authorization: Bearer obs_..." \</div>
+      <div class="line">    -d '{"intent":"waterproof boots for a muddy trail"}'</div>
+    </div>
+  </div>
+</section>
+
 <section id="pricing">
   <div class="wrap">
     <p class="kicker">Pricing</p>
@@ -486,6 +594,8 @@
       <span class="pill">MCP server — Claude Code, Claude Desktop, Cursor</span>
       <span class="pill">LangChain tool</span>
       <span class="pill">CrewAI tool</span>
+      <span class="pill">A2A — agent card + message:send</span>
+      <span class="pill">/v1/commerce — ACP buyer/seller discovery</span>
       <span class="pill">Raw HTTP — any language</span>
     </div>
   </div>
@@ -500,6 +610,6 @@
       </div>
       <a class="btn btn-solid" href="#pricing">Get an API key</a>
     </div>
-    <p class="foot-note">Built on OBSERVE, a local-first semantic code search engine. Every claim on this page traces to a reproducible benchmark, not a projection.</p>
+    <p class="foot-note">Built on OBSERVE, a local-first semantic code search engine, now also an ACP-compatible commerce discovery layer. Every claim on this page traces to a reproducible benchmark, not a projection.</p>
   </div>
 </footer>
