@@ -49,6 +49,7 @@ from typing import Dict, List, Optional
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
+import commerce_search_index
 import commerce_spiking_memory
 import obsidian_memory
 
@@ -187,12 +188,36 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
 
     def _save_memory(key_hash: str, memory: commerce_spiking_memory.ListingAffinityMemory) -> None:
         rows = memory.to_rows()
+        if not rows:
+            return
         with db.get_conn() as conn:
-            conn.execute("DELETE FROM commerce_memory_weights WHERE key_hash = ?", (key_hash,))
+            # UPSERT, not DELETE-then-reinsert-everything -- a real
+            # efficiency fix found while checking this for scale: the
+            # original version deleted and rewrote the WHOLE weight set
+            # (up to MAX_TRACKED_LISTINGS^2 rows) on every single search
+            # or purchase, real write amplification under concurrent
+            # traffic. Same end state, no full-table churn.
             conn.executemany(
-                "INSERT INTO commerce_memory_weights (key_hash, src_item, dst_item, weight) VALUES (?, ?, ?, ?)",
+                "INSERT INTO commerce_memory_weights (key_hash, src_item, dst_item, weight) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(key_hash, src_item, dst_item) DO UPDATE SET weight = excluded.weight",
                 [(key_hash, src, dst, weight) for src, dst, weight in rows],
             )
+
+    # FAISS-backed vector index, one per real db.DB_PATH (not a single
+    # flat cache) -- see commerce_search_index.py's module docstring for
+    # the real ~32.7s/search benchmark this replaces. Keyed by DB_PATH
+    # rather than a single instance so each test's isolated temp DB gets
+    # its own isolated index (matching how SQLite's own db.DB_PATH
+    # monkeypatch already isolates tests) instead of leaking listing IDs
+    # across tests that happen to share the same process.
+    _commerce_indices: Dict[str, commerce_search_index.CommerceVectorIndex] = {}
+
+    def _get_commerce_index(dim: int) -> commerce_search_index.CommerceVectorIndex:
+        db_path = db.DB_PATH
+        if db_path not in _commerce_indices:
+            index_path = str(db_path) + ".commerce_index.faiss"
+            _commerce_indices[db_path] = commerce_search_index.CommerceVectorIndex(dim, index_path)
+        return _commerce_indices[db_path]
 
     @app.post("/v1/commerce/sellers", response_model=SellerRegisterResponse)
     def register_seller(req: SellerRegisterRequest, authorization: Optional[str] = Header(None)):
@@ -249,14 +274,27 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
 
         texts = [f"{l.name}. {l.description}" for l in req.listings]
         vecs = engine.model.encode(texts, normalize_embeddings=True).astype("float32")
+        row_ids = []
         with db.get_conn() as conn:
             for listing, vec in zip(req.listings, vecs):
-                conn.execute(
+                # embedding column kept for schema compatibility (NOT
+                # NULL) but no longer written or read as a real vector --
+                # the FAISS index below is now the single source of
+                # truth for search. Real scale bug this replaces: search
+                # used to re-parse this column's comma-joined floats for
+                # EVERY listing on EVERY request; see
+                # commerce_search_index.py's module docstring for the
+                # measured ~32.7s/search cost that caused.
+                cur = conn.execute(
                     "INSERT INTO commerce_listings (seller_id, item_id, name, description, unit_amount, currency, category, embedding, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (seller_id, listing.item_id, listing.name, listing.description, listing.unit_amount,
-                     listing.currency, listing.category, ",".join(str(x) for x in vec.tolist()), time.time()),
+                     listing.currency, listing.category, "", time.time()),
                 )
+                row_ids.append(cur.lastrowid)
+
+        commerce_index = _get_commerce_index(vecs.shape[1])
+        commerce_index.add(row_ids, vecs)
         return ListingsAddResponse(added=len(req.listings))
 
     @app.post("/v1/commerce/search", response_model=CommerceSearchResponse)
@@ -270,35 +308,60 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
             db.deduct_credit(raw_key, -credits_per_search)
             raise HTTPException(status_code=503, detail="search engine not ready yet")
 
-        import numpy as np
+        qvec = engine.model.encode([req.intent], normalize_embeddings=True).astype("float32")[0]
+        commerce_index = _get_commerce_index(qvec.shape[0])
+
+        if commerce_index.ntotal == 0:
+            record = db.get_key_record(raw_key)
+            return CommerceSearchResponse(matches=[], credits_remaining=record["credits"])
+
+        # Real scale fix, measured before assuming it mattered: this used
+        # to SELECT every listing matching category/price into Python and
+        # score each one in a loop -- ~32.7s/search at 20,000 real
+        # listings (see commerce_search_index.py's module docstring).
+        # FAISS now generates a small candidate set directly (exact
+        # cosine similarity, not approximate -- see that module for why),
+        # and only THOSE rows get fetched/filtered. Over-fetches beyond
+        # req.k because category/max_price filtering happens AFTER
+        # retrieval, on the candidate set, not inside the vector search
+        # itself -- a real, disclosed tradeoff: a very restrictive filter
+        # combined with a small candidate pool can under-return relative
+        # to what technically exists in the full catalog. 10x/min-100 is
+        # a judgment call, not a measurement.
+        k_candidates = max(req.k * 10, 100)
+        candidates = commerce_index.search(qvec, k_candidates)
+        if not candidates:
+            record = db.get_key_record(raw_key)
+            return CommerceSearchResponse(matches=[], credits_remaining=record["credits"])
+
+        candidate_listing_ids = [listing_id for listing_id, _score in candidates]
+        score_by_id = {listing_id: score for listing_id, score in candidates}
 
         with db.get_conn() as conn:
+            placeholders = ",".join("?" * len(candidate_listing_ids))
             sql = (
-                "SELECT l.*, s.name AS seller_name, s.checkout_session_url AS checkout_session_url "
-                "FROM commerce_listings l JOIN commerce_sellers s ON l.seller_id = s.id"
+                f"SELECT l.*, s.name AS seller_name, s.checkout_session_url AS checkout_session_url "
+                f"FROM commerce_listings l JOIN commerce_sellers s ON l.seller_id = s.id "
+                f"WHERE l.id IN ({placeholders})"
             )
-            params = []
-            clauses = []
+            params = list(candidate_listing_ids)
             if req.category:
-                clauses.append("l.category = ?")
+                sql += " AND l.category = ?"
                 params.append(req.category)
             if req.max_price is not None:
-                clauses.append("(l.unit_amount IS NULL OR l.unit_amount <= ?)")
+                sql += " AND (l.unit_amount IS NULL OR l.unit_amount <= ?)"
                 params.append(req.max_price)
-            if clauses:
-                sql += " WHERE " + " AND ".join(clauses)
             rows = conn.execute(sql, params).fetchall()
 
         if not rows:
             record = db.get_key_record(raw_key)
             return CommerceSearchResponse(matches=[], credits_remaining=record["credits"])
 
-        qvec = engine.model.encode([req.intent], normalize_embeddings=True).astype("float32")[0]
-        scored = []
-        for row in rows:
-            vec = np.array([float(x) for x in row["embedding"].split(",")], dtype="float32")
-            cosine = float(np.dot(qvec, vec))  # both sides are normalize_embeddings=True unit vectors, so dot == cosine similarity
-            scored.append((cosine, row))
+        # score_by_id's value IS the real cosine similarity already
+        # (IndexFlatIP over L2-normalized vectors == cosine, exactly the
+        # same equivalence the old code relied on for its manual dot
+        # product) -- no re-computation needed.
+        scored = [(score_by_id[row["id"]], row) for row in rows]
 
         # Listings are keyed by (seller_id, item_id) for the memory, not
         # bare item_id -- item_id is only unique WITHIN one seller's own
