@@ -360,6 +360,43 @@ def test_purchased_feedback_reinforces_and_beats_plain_search_boost(client, fres
     assert search_after_purchase > search_only_boost
 
 
+def test_purchase_after_a_real_search_still_reinforces_not_resets(client, fresh_db):
+    """Reproduces a real bug found by testing this live against the
+    production server, not caught by the test above: that test fires
+    feedback BEFORE ever searching, so the neuron starts at 0 heat and
+    a fixed drive safely lands below threshold. The realistic order is
+    the opposite -- a buyer searches, THEN buys -- which leaves the
+    purchased item with real residual heat already on it. Adding a
+    fixed CONFIRMED_PURCHASE_DRIVE on top of that residual heat pushed
+    the neuron over threshold, causing a real LIF fire+reset that
+    erased its own reinforcement (observed live: memory_boost read 0.0
+    for the just-purchased item, the opposite of intended). Fixed by
+    computing the actual safe drive against current state."""
+    api_key = _signup_and_fund(client, fresh_db)
+    seller_id = _make_seller_and_listing(client, api_key)
+
+    # Realistic order: search first (creates real residual heat on
+    # sku-boots), THEN report the purchase.
+    client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    resp = client.post(
+        "/v1/commerce/feedback",
+        json={"seller_id": seller_id, "item_id": "sku-boots", "outcome": "purchased"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["reinforced"] is True
+
+    boost_after_purchase = client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    ).json()["matches"][0]["memory_boost"]
+
+    assert boost_after_purchase > 0.0, "a real confirmed purchase must never read as zero boost, even with residual heat already on the neuron"
+
+
 def test_not_purchased_feedback_is_recorded_but_not_reinforced(client, fresh_db):
     api_key = _signup_and_fund(client, fresh_db)
     seller_id = _make_seller_and_listing(client, api_key)

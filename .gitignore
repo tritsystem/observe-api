@@ -15,3 +15,4 @@ private/
 .env.*
 !*.env.example
 *.log
+*.faiss

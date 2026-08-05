@@ -488,7 +488,25 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
             now_ms = time.time() * 1000.0
             memory.decay(now_ms)
             composite_id = f"{req.seller_id}:{req.item_id}"
-            memory.observe_search([composite_id], now_ms, top_drive=CONFIRMED_PURCHASE_DRIVE)
+            # Real bug found by testing this live, not in isolation: a
+            # FIXED drive (even one already kept below threshold, see
+            # CONFIRMED_PURCHASE_DRIVE's own comment) can still push the
+            # neuron over threshold and self-erase via the same LIF
+            # fire/reset mechanism -- IF the neuron already has residual
+            # heat from a real prior search, which is the realistic case
+            # (a buyer searches before they buy). Reproduced live: search
+            # for boots, then report a purchase, then search again --
+            # the purchased item's boost read 0.0, the opposite of
+            # intended. Fixed by computing the ACTUAL safe drive against
+            # CURRENT state (post-decay) instead of a fixed constant,
+            # guaranteeing this can only raise heat, never reset it.
+            current_heat = memory.heat(composite_id)
+            safety_margin = 1.0
+            safe_drive = max(0.0, min(
+                CONFIRMED_PURCHASE_DRIVE,
+                commerce_spiking_memory.DEFAULT_THRESHOLD - safety_margin - current_heat,
+            ))
+            memory.observe_search([composite_id], now_ms, top_drive=safe_drive)
             _save_memory(key_hash, memory)
             reinforced = True
 
