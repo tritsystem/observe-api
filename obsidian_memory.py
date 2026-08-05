@@ -36,7 +36,35 @@ import glob as globmod
 import os
 import re
 
-DEFAULT_VAULT_ROOT = r"C:\Users\gbran\OneDrive\Documents\Spikeling\vault"
+
+def _locate_vault_root() -> str:
+    """Verified by testing, not assumed: a hardcoded bare Windows path
+    (`C:\\Users\\...`) doesn't crash under WSL (where server.py's real
+    production process runs, see MIGRATE.md) -- os.path.isdir() on it
+    just silently returns False, so every function here would silently
+    report "not found" / "no matches" instead of erroring, which is
+    worse than a crash for a memory system meant to be trusted. Checks
+    OBSIDIAN_VAULT_ROOT first, then both the native-Windows and
+    WSL-mounted real paths -- same pattern already fixed in
+    commerce_spiking_memory.py for the same underlying reason."""
+    env_path = os.environ.get("OBSIDIAN_VAULT_ROOT")
+    if env_path and os.path.isdir(env_path):
+        return env_path
+    for candidate in (
+        r"C:\Users\gbran\OneDrive\Documents\Spikeling\vault",
+        "/mnt/c/Users/gbran/OneDrive/Documents/Spikeling/vault",
+    ):
+        if os.path.isdir(candidate):
+            return candidate
+    # Fall back to the Windows path even if unverified -- matches this
+    # module's prior behavior for any caller that already handles a
+    # missing vault gracefully (e.g. get_active_lessons' documented
+    # empty-list-on-missing-Home.md contract), rather than raising and
+    # breaking an unrelated caller that never expected an exception here.
+    return r"C:\Users\gbran\OneDrive\Documents\Spikeling\vault"
+
+
+DEFAULT_VAULT_ROOT = _locate_vault_root()
 
 
 def _slugify(title, max_words=8):

@@ -8,6 +8,7 @@ outrank a laptop listing) rather than just checking the endpoint returns
 """
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -16,6 +17,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import billing  # noqa: E402
+import commerce_router  # noqa: E402
 import server  # noqa: E402
 
 
@@ -44,6 +46,11 @@ def client(fresh_db, monkeypatch):
     monkeypatch.setattr(server.engine, "model", _FakeModel())
     monkeypatch.setattr(server.engine, "ready", True)
     monkeypatch.setattr(billing, "create_checkout_session", lambda email, key_hash: "https://checkout.stripe.com/fake-session")
+    # Never touch the user's real Obsidian vault from an automated test
+    # run -- tests use this mock as a spy (see
+    # test_purchased_feedback_archives_to_obsidian) rather than the real
+    # filesystem writer.
+    monkeypatch.setattr(commerce_router, "obsidian_memory", MagicMock())
     return TestClient(server.app)
 
 
@@ -211,3 +218,143 @@ def test_repeated_searches_wire_real_spiking_memory_end_to_end(client, fresh_db)
         headers={"Authorization": f"Bearer {api_key}"},
     )
     assert resp2.json()["matches"][0]["memory_boost"] > 0.0
+
+
+def _make_seller_and_listing(client, api_key, item_id="sku-boots"):
+    seller_id = client.post(
+        "/v1/commerce/sellers",
+        json={"name": "General Store", "checkout_session_url": "https://store.example.com/checkout_sessions"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    ).json()["seller_id"]
+    client.post(
+        f"/v1/commerce/sellers/{seller_id}/listings",
+        json={"listings": [{"item_id": item_id, "name": "Boots", "description": "hiking boot waterproof", "unit_amount": 12000}]},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    return seller_id
+
+
+def test_feedback_requires_auth(client, fresh_db):
+    resp = client.post("/v1/commerce/feedback", json={"seller_id": 1, "item_id": "sku-boots", "outcome": "purchased"})
+    assert resp.status_code == 401
+
+
+def test_feedback_rejects_unknown_seller(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db)
+    resp = client.post(
+        "/v1/commerce/feedback",
+        json={"seller_id": 9999, "item_id": "sku-boots", "outcome": "purchased"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 404
+
+
+def test_feedback_rejects_invalid_outcome(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db)
+    seller_id = _make_seller_and_listing(client, api_key)
+    resp = client.post(
+        "/v1/commerce/feedback",
+        json={"seller_id": seller_id, "item_id": "sku-boots", "outcome": "loved_it"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 400
+
+
+def test_purchased_feedback_reinforces_and_beats_plain_search_boost(client, fresh_db):
+    """The actual self-adjustment claim: a real confirmed purchase should
+    teach the network MORE than merely appearing in search results does
+    (CONFIRMED_PURCHASE_DRIVE > the ordinary top-hit drive)."""
+    api_key = _signup_and_fund(client, fresh_db)
+    seller_id = _make_seller_and_listing(client, api_key)
+
+    resp = client.post(
+        "/v1/commerce/feedback",
+        json={"seller_id": seller_id, "item_id": "sku-boots", "outcome": "purchased"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["recorded"] is True
+    assert body["reinforced"] is True
+
+    search_after_purchase = client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    ).json()["matches"][0]["memory_boost"]
+
+    # Compare against a second, independent key that only ever searched
+    # (never reported a purchase) -- isolates the purchase-feedback
+    # effect from ordinary search-driven learning.
+    other_key = _signup_and_fund(client, fresh_db, email="other-buyer@example.com")
+    client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {other_key}"},
+    )
+    search_only_boost = client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {other_key}"},
+    ).json()["matches"][0]["memory_boost"]
+
+    assert search_after_purchase > search_only_boost
+
+
+def test_not_purchased_feedback_is_recorded_but_not_reinforced(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db)
+    seller_id = _make_seller_and_listing(client, api_key)
+    resp = client.post(
+        "/v1/commerce/feedback",
+        json={"seller_id": seller_id, "item_id": "sku-boots", "outcome": "not_purchased"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["recorded"] is True
+    assert body["reinforced"] is False
+
+
+def test_purchased_feedback_archives_to_obsidian_vault(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db)
+    seller_id = _make_seller_and_listing(client, api_key)
+
+    resp = client.post(
+        "/v1/commerce/feedback",
+        json={"seller_id": seller_id, "item_id": "sku-boots", "outcome": "purchased"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+    commerce_router.obsidian_memory.log_project_work.assert_called_once()
+    call_kwargs = commerce_router.obsidian_memory.log_project_work.call_args.kwargs
+    assert call_kwargs["project_tag"] == "observe-api-commerce"
+    assert "sku-boots" in call_kwargs["output_text"]
+    assert "purchased" in call_kwargs["output_text"]
+
+
+def test_non_purchase_feedback_does_not_write_to_obsidian_vault(client, fresh_db):
+    """Scoped deliberately to confirmed purchases only (see
+    commerce_router.py's module docstring) -- routine non-purchase
+    feedback shouldn't flood the vault with an entry per call."""
+    api_key = _signup_and_fund(client, fresh_db)
+    seller_id = _make_seller_and_listing(client, api_key)
+    client.post(
+        "/v1/commerce/feedback",
+        json={"seller_id": seller_id, "item_id": "sku-boots", "outcome": "not_purchased"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    commerce_router.obsidian_memory.log_project_work.assert_not_called()
+
+
+def test_vault_write_failure_does_not_break_the_feedback_response(client, fresh_db):
+    """Archiving is a best-effort side effect, never a dependency of this
+    endpoint's own correctness (see module docstring + the try/except in
+    commerce_feedback())."""
+    api_key = _signup_and_fund(client, fresh_db)
+    seller_id = _make_seller_and_listing(client, api_key)
+    commerce_router.obsidian_memory.log_project_work.side_effect = OSError("disk full")
+
+    resp = client.post(
+        "/v1/commerce/feedback",
+        json={"seller_id": seller_id, "item_id": "sku-boots", "outcome": "purchased"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["reinforced"] is True

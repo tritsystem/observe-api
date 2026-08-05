@@ -92,6 +92,21 @@ def init_db():
                 created_at REAL NOT NULL
             )
         """)
+        # Ground-truth feedback loop, self-reported by the buyer's own
+        # agent -- see commerce_router.py's POST /v1/commerce/feedback
+        # docstring for the real, disclosed trust boundary (OBSERVE never
+        # sees the actual checkout, so this is self-reported, not
+        # independently verified).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS commerce_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_hash TEXT NOT NULL,
+                seller_id INTEGER NOT NULL,
+                item_id TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )
+        """)
 
 
 def create_api_key(email: str, initial_credits: int = 0) -> str:

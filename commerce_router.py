@@ -30,6 +30,18 @@ credentials, proxy the checkout call, hold funds, or act as a payment
 provider or merchant of record. It returns a pointer to a seller's own
 real ACP endpoint, the same trust boundary a search engine or directory
 has with a business it lists -- never a payment processor's.
+
+Real, confirmed purchases (POST /v1/commerce/feedback with
+outcome="purchased") also archive to the user's real Obsidian vault via
+obsidian_memory.py -- the same vault interface already dogfooded for
+this session's own work, applied here to commerce events instead of
+dev-session narration. Scoped deliberately to confirmed purchases only,
+not every search or every feedback call: that's the rare, real
+ground-truth event worth a durable, human-readable archive entry, not
+routine API traffic that would flood the vault. A vault-write failure
+never breaks the actual feedback response -- archiving is a best-effort
+side effect of a real event, not a dependency of the API's own
+correctness (see commerce_feedback()'s try/except).
 """
 import time
 from typing import Dict, List, Optional
@@ -38,6 +50,7 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 import commerce_spiking_memory
+import obsidian_memory
 
 CREDITS_PER_COMMERCE_SEARCH_DEFAULT = 1
 
@@ -106,6 +119,38 @@ class CommerceSearchResponse(BaseModel):
         "Protocol). Call it directly with the given item_id to complete "
         "a purchase -- this API never handles payment or credentials."
     )
+
+
+_VALID_OUTCOMES = {"purchased", "not_purchased", "irrelevant"}
+
+# A confirmed real purchase is stronger ground truth than merely
+# appearing in a search result (see commerce_spiking_memory.py's
+# DEFAULT_TOP_HIT_DRIVE=80.0, used for ordinary matches) -- reinforced
+# with more drive so the learned network actually distinguishes "this
+# got shown" from "this got bought." MUST stay strictly below the
+# network's neuron threshold (DEFAULT_THRESHOLD=100.0) -- found by
+# testing, not assumed: core/runtime/runtime.py's real _fire() resets
+# membrane_potential to exactly 0.0 the instant a neuron crosses
+# threshold, so a drive AT or ABOVE threshold makes the neuron fire and
+# immediately erases the very "heat" this reinforcement is meant to
+# create -- a stronger signal that self-defeats via the LIF fire/reset
+# semantics, not a bug in this module. 95.0 leaves real headroom above
+# the ordinary 80.0 drive while staying safely under the 100.0
+# threshold. A judgment call, not a measurement (no real conversion
+# data exists yet to tune this against).
+CONFIRMED_PURCHASE_DRIVE = 95.0
+
+
+class FeedbackRequest(BaseModel):
+    seller_id: int
+    item_id: str
+    outcome: str  # "purchased" | "not_purchased" | "irrelevant"
+
+
+class FeedbackResponse(BaseModel):
+    recorded: bool
+    reinforced: bool
+    note: str
 
 
 def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_fn, credits_per_search: int = CREDITS_PER_COMMERCE_SEARCH_DEFAULT):
@@ -238,3 +283,99 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
 
         record = db.get_key_record(raw_key)
         return CommerceSearchResponse(matches=matches, credits_remaining=record["credits"])
+
+    @app.post("/v1/commerce/feedback", response_model=FeedbackResponse)
+    def commerce_feedback(req: FeedbackRequest, authorization: Optional[str] = Header(None)):
+        """The self-adjusting feedback loop: a buyer's agent reports back
+        what actually happened after calling a match's checkout_session_url
+        directly (this API never sees that call -- see the module
+        docstring's trust boundary). "purchased" feeds real ground truth
+        into that buyer's ListingAffinityMemory via a stronger-than-normal
+        STDP drive (CONFIRMED_PURCHASE_DRIVE), the same "ground-truth-
+        confirmed signal reinforced more than a mere occurrence" pattern
+        spiking_adaptive_weights.py already established for evidence-kind
+        learning, applied here to listings instead.
+
+        Disclosed limitation, inherited from that same established
+        pattern (see spikeling-stdp-dt-0 lesson + spiking_adaptive_
+        weights.py's own docstring): replayed in forward-chronological
+        order, the real STDPLearner rule's `dt` is never negative, so it
+        can only push a listing's learned weight UP, never down --
+        "not_purchased"/"irrelevant" feedback is honestly recorded (for
+        future analysis, and so this endpoint doesn't silently drop real
+        signal) but does NOT currently suppress that listing's ranking.
+        Not a workaround for this; disclosed as a real, accepted
+        characteristic of the mechanism, consistent with how it's already
+        treated elsewhere in this codebase.
+
+        Also disclosed: this is SELF-REPORTED by the buyer's own key, not
+        independently verified against the seller's real checkout record
+        (this API never sees that transaction, by design). A malicious or
+        careless caller could report a false "purchased" to inflate a
+        listing's ranking for their own key's future searches -- the
+        blast radius is scoped to that one caller's own learned memory,
+        not global, but this is a real, not-yet-hardened trust gap worth
+        stating plainly rather than leaving implicit."""
+        raw_key = require_key_fn(authorization)
+        if req.outcome not in _VALID_OUTCOMES:
+            raise HTTPException(status_code=400, detail=f"outcome must be one of {sorted(_VALID_OUTCOMES)}")
+
+        with db.get_conn() as conn:
+            seller = conn.execute("SELECT * FROM commerce_sellers WHERE id = ?", (req.seller_id,)).fetchone()
+        if seller is None:
+            raise HTTPException(status_code=404, detail="no seller with that id")
+
+        key_hash = db.hash_key(raw_key)
+        with db.get_conn() as conn:
+            conn.execute(
+                "INSERT INTO commerce_feedback (key_hash, seller_id, item_id, outcome, created_at) VALUES (?, ?, ?, ?, ?)",
+                (key_hash, req.seller_id, req.item_id, req.outcome, time.time()),
+            )
+
+        reinforced = False
+        if req.outcome == "purchased":
+            memory = _key_memories.setdefault(key_hash, commerce_spiking_memory.ListingAffinityMemory())
+            now_ms = time.time() * 1000.0
+            memory.decay(now_ms)
+            composite_id = f"{req.seller_id}:{req.item_id}"
+            memory.observe_search([composite_id], now_ms, top_drive=CONFIRMED_PURCHASE_DRIVE)
+            reinforced = True
+
+            with db.get_conn() as conn:
+                listing = conn.execute(
+                    "SELECT * FROM commerce_listings WHERE seller_id = ? AND item_id = ?",
+                    (req.seller_id, req.item_id),
+                ).fetchone()
+            listing_name = listing["name"] if listing else req.item_id
+            try:
+                obsidian_memory.log_project_work(
+                    title=f"Real confirmed purchase: {listing_name} via {seller['name']}",
+                    project_tag="observe-api-commerce",
+                    status="real_event",
+                    output_text=(
+                        f"Buyer key {key_hash[:12]}... reported outcome=purchased for "
+                        f"seller_id={req.seller_id} ({seller['name']}), item_id={req.item_id} "
+                        f"({listing_name}). Self-reported by the buyer's own agent, not "
+                        f"independently verified against the seller's real ACP checkout record "
+                        f"(this API never sees that transaction by design -- see "
+                        f"commerce_router.py's module docstring). Reinforced this buyer's "
+                        f"listing-affinity memory with drive={CONFIRMED_PURCHASE_DRIVE} via real "
+                        f"Spikeling STDP (commerce_spiking_memory.py)."
+                    ),
+                )
+            except Exception:
+                # Archiving to the vault is a best-effort side effect of a
+                # real event, never a dependency of this endpoint's own
+                # correctness -- see module docstring. A vault-write
+                # failure (disk full, path missing, permissions) must not
+                # turn a real, successfully-recorded purchase into a
+                # failed API response.
+                pass
+
+        note = (
+            "Recorded and reinforced -- this listing's learned affinity for your key just grew from real ground truth."
+            if reinforced else
+            "Recorded. Not currently used to suppress ranking (the real STDP mechanism here can only "
+            "strengthen, never weaken, a learned connection) -- see this endpoint's docstring."
+        )
+        return FeedbackResponse(recorded=True, reinforced=reinforced, note=note)
