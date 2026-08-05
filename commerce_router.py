@@ -32,12 +32,24 @@ real ACP endpoint, the same trust boundary a search engine or directory
 has with a business it lists -- never a payment processor's.
 """
 import time
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
+import commerce_spiking_memory
+
 CREDITS_PER_COMMERCE_SEARCH_DEFAULT = 1
+
+# How much a listing's learned affinity heat can nudge its rank, relative
+# to cosine similarity (which stays the primary signal -- see
+# commerce_spiking_memory.py's module docstring for why this is additive,
+# not a replacement). A judgment call, not a measurement: heat is
+# normalized to roughly [0, 1] (membrane_potential / neuron threshold,
+# capped) then scaled by this weight before adding to the [~0, 1] cosine
+# score, so even a maximally "hot" listing can only outrank a
+# meaningfully-more-relevant cosine match by this much.
+MEMORY_BLEND_WEIGHT = 0.15
 
 
 class SellerRegisterRequest(BaseModel):
@@ -82,6 +94,7 @@ class CommerceMatch(BaseModel):
     description: str
     unit_amount: Optional[int]
     currency: str
+    memory_boost: float = 0.0  # how much learned affinity (see commerce_spiking_memory.py) nudged this match's score -- 0.0 if never matched together with anything before for this buyer key
 
 
 class CommerceSearchResponse(BaseModel):
@@ -96,6 +109,16 @@ class CommerceSearchResponse(BaseModel):
 
 
 def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_fn, credits_per_search: int = CREDITS_PER_COMMERCE_SEARCH_DEFAULT):
+    # Per-buyer-key learned listing-affinity memory (real Spikeling STDP,
+    # see commerce_spiking_memory.py) -- one ListingAffinityMemory per
+    # key_hash, created lazily on that key's first search and kept for
+    # the life of this process. A restart resets learned affinity to
+    # cold; that's a disclosed v1 limitation (no persistence layer for
+    # the network's synapse weights yet), not silent data loss of
+    # anything else -- the underlying listings/cosine ranking are
+    # unaffected, only the additive memory_boost signal resets.
+    _key_memories: Dict[str, commerce_spiking_memory.ListingAffinityMemory] = {}
+
     @app.post("/v1/commerce/sellers", response_model=SellerRegisterResponse)
     def register_seller(req: SellerRegisterRequest, authorization: Optional[str] = Header(None)):
         raw_key = require_key_fn(authorization)
@@ -173,17 +196,45 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
         scored = []
         for row in rows:
             vec = np.array([float(x) for x in row["embedding"].split(",")], dtype="float32")
-            score = float(np.dot(qvec, vec))  # both sides are normalize_embeddings=True unit vectors, so dot == cosine similarity
-            scored.append((score, row))
-        scored.sort(key=lambda t: -t[0])
+            cosine = float(np.dot(qvec, vec))  # both sides are normalize_embeddings=True unit vectors, so dot == cosine similarity
+            scored.append((cosine, row))
 
+        # Listings are keyed by (seller_id, item_id) for the memory, not
+        # bare item_id -- item_id is only unique WITHIN one seller's own
+        # catalog (it's their own SKU), so two different sellers reusing
+        # "sku-1" must not be treated as the same listing by the learned
+        # affinity network.
+        key_hash = db.hash_key(raw_key)
+        memory = _key_memories.setdefault(key_hash, commerce_spiking_memory.ListingAffinityMemory())
+        now_ms = time.time() * 1000.0
+        memory.decay(now_ms)
+
+        blended = []
+        for cosine, row in scored:
+            composite_id = f"{row['seller_id']}:{row['item_id']}"
+            # Heat reflects PAST searches only -- read before this
+            # search's own observe_search call below, so a listing can
+            # never boost itself from the very search that's computing
+            # its rank right now.
+            heat = memory.heat(composite_id)
+            boost = MEMORY_BLEND_WEIGHT * min(1.0, heat / commerce_spiking_memory.DEFAULT_THRESHOLD)
+            blended.append((cosine + boost, cosine, boost, row, composite_id))
+        blended.sort(key=lambda t: -t[0])
+
+        top = blended[:req.k]
         matches = [
             CommerceMatch(
-                score=score, seller_name=row["seller_name"], checkout_session_url=row["checkout_session_url"],
+                score=final_score, seller_name=row["seller_name"], checkout_session_url=row["checkout_session_url"],
                 item_id=row["item_id"], name=row["name"], description=row["description"],
-                unit_amount=row["unit_amount"], currency=row["currency"],
+                unit_amount=row["unit_amount"], currency=row["currency"], memory_boost=boost,
             )
-            for score, row in scored[:req.k]
+            for final_score, cosine, boost, row, composite_id in top
         ]
+
+        # Now that ranking is decided, teach the memory what this search
+        # actually returned -- affects FUTURE searches for this key, not
+        # this one (see the heat-read-before-observe ordering above).
+        memory.observe_search([composite_id for *_rest, composite_id in top], now_ms)
+
         record = db.get_key_record(raw_key)
         return CommerceSearchResponse(matches=matches, credits_remaining=record["credits"])

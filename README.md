@@ -165,6 +165,31 @@ that verifies actual ranking behavior (a boots-related query outranks an
 unrelated listing) and per-key listing isolation, not just that
 endpoints return 200.
 
+**Learned listing-affinity memory (real Spikeling STDP, not a counter)**:
+commerce_spiking_memory.py gives each buyer key its own live network --
+one neuron per listing that key has searched, real STDP learning (same
+mechanism as spiking_search_heatmap.py's code-search heatmap, same
+compiler.compiler/runtime.runtime engine, not a reimplementation) that
+reinforces listings which keep getting returned to that buyer. A
+listing's recent "heat" nudges its rank (`memory_boost` in each match,
+capped at MEMORY_BLEND_WEIGHT=0.15 of the cosine score -- additive, not
+a replacement for semantic relevance). Verified two ways: directly
+against the real engine (tests/test_commerce_spiking_memory.py -- heat
+grows from real firing, a never-searched listing stays at exactly 0.0,
+the real STDP asymmetry already documented in spiking_search_heatmap.py
+reproduces here too) and end-to-end through the actual HTTP API
+(tests/test_commerce_router.py -- memory_boost is 0.0 on a listing's
+first-ever search, nonzero on the next one). Found and fixed a real bug
+building this: the sibling heatmap module hardcodes a bare Windows path
+to locate the Spikeling engine, which silently fails
+(ModuleNotFoundError) under WSL -- where this service's real production
+process actually runs (see MIGRATE.md). commerce_spiking_memory.py
+checks SPIKELING_CORE_PATH, then both the native-Windows and
+WSL-mounted real paths, instead of assuming either. No persistence yet
+for the learned network itself -- a restart resets memory to cold; a
+disclosed v1 gap, not silent data loss (listings/cosine ranking are
+unaffected).
+
 ## Honest limitations (v1, disclosed not hidden)
 
 - **Private per-tenant indexing is now built** (`tenant_index.py`,

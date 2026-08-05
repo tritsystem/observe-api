@@ -180,3 +180,34 @@ def test_search_charges_a_credit_and_refuses_at_zero_balance(client, fresh_db):
 def test_search_requires_auth(client, fresh_db):
     resp = client.post("/v1/commerce/search", json={"intent": "anything"})
     assert resp.status_code == 401
+
+
+def test_repeated_searches_wire_real_spiking_memory_end_to_end(client, fresh_db):
+    """Not a unit test of commerce_spiking_memory.py itself (see
+    tests/test_commerce_spiking_memory.py for that, against the real
+    Spikeling engine) -- this verifies the actual HTTP-level wiring:
+    memory_boost starts at 0.0 (nothing learned yet) and becomes nonzero
+    after a listing has genuinely been searched-and-returned before."""
+    api_key = _signup_and_fund(client, fresh_db)
+    seller_id = client.post(
+        "/v1/commerce/sellers",
+        json={"name": "General Store", "checkout_session_url": "https://store.example.com/checkout_sessions"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    ).json()["seller_id"]
+    client.post(
+        f"/v1/commerce/sellers/{seller_id}/listings",
+        json={"listings": [{"item_id": "sku-boots", "name": "Boots", "description": "hiking boot waterproof", "unit_amount": 12000}]},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+
+    resp1 = client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp1.json()["matches"][0]["memory_boost"] == 0.0
+
+    resp2 = client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp2.json()["matches"][0]["memory_boost"] > 0.0
