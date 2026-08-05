@@ -75,6 +75,68 @@ def test_register_seller_requires_https(client, fresh_db):
     assert "https" in resp.json()["detail"]
 
 
+def test_register_seller_rejects_empty_name(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db)
+    resp = client.post(
+        "/v1/commerce/sellers",
+        json={"name": "   ", "checkout_session_url": "https://store.example.com/checkout_sessions"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 400
+
+
+def test_add_listings_rejects_non_positive_unit_amount(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db)
+    seller_id = client.post(
+        "/v1/commerce/sellers",
+        json={"name": "General Store", "checkout_session_url": "https://store.example.com/checkout_sessions"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    ).json()["seller_id"]
+    resp = client.post(
+        f"/v1/commerce/sellers/{seller_id}/listings",
+        json={"listings": [{"item_id": "sku-1", "name": "Free?!", "description": "suspicious", "unit_amount": 0}]},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 400
+
+
+def test_add_listings_rejects_empty_batch(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db)
+    seller_id = client.post(
+        "/v1/commerce/sellers",
+        json={"name": "General Store", "checkout_session_url": "https://store.example.com/checkout_sessions"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    ).json()["seller_id"]
+    resp = client.post(
+        f"/v1/commerce/sellers/{seller_id}/listings",
+        json={"listings": []},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 400
+
+
+def test_add_listings_enforces_per_seller_cap(client, fresh_db, monkeypatch):
+    monkeypatch.setattr(commerce_router, "MAX_LISTINGS_PER_SELLER", 1)
+    api_key = _signup_and_fund(client, fresh_db)
+    seller_id = client.post(
+        "/v1/commerce/sellers",
+        json={"name": "General Store", "checkout_session_url": "https://store.example.com/checkout_sessions"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    ).json()["seller_id"]
+    client.post(
+        f"/v1/commerce/sellers/{seller_id}/listings",
+        json={"listings": [{"item_id": "sku-1", "name": "First", "description": "d"}]},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    resp = client.post(
+        f"/v1/commerce/sellers/{seller_id}/listings",
+        json={"listings": [{"item_id": "sku-2", "name": "Second", "description": "d"}]},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 400
+    assert "cap" in resp.json()["detail"]
+
+
 def test_register_seller_and_add_listings(client, fresh_db):
     api_key = _signup_and_fund(client, fresh_db)
     resp = client.post(
@@ -358,3 +420,51 @@ def test_vault_write_failure_does_not_break_the_feedback_response(client, fresh_
     )
     assert resp.status_code == 200
     assert resp.json()["reinforced"] is True
+
+
+def test_learned_memory_survives_a_simulated_process_restart(client, fresh_db):
+    """The actual robustness claim: register_commerce_routes() a second
+    time on a brand-new FastAPI app (a fresh set of closures/in-memory
+    caches, same DB file) simulates a real process restart. Real bug this
+    guards against: an earlier version kept ListingAffinityMemory purely
+    in-process, so a restart silently discarded all learned affinity."""
+    from fastapi import FastAPI as _FastAPI
+    from fastapi.testclient import TestClient as _TestClient
+
+    # Two listings, both real matches for the same query -- a learned
+    # CONNECTION (the persisted signal) needs a real pair to form
+    # between; a single-listing catalog only ever exercises heat (never
+    # persisted, by design), so it can't prove persistence actually
+    # affects visible ranking.
+    api_key = _signup_and_fund(client, fresh_db)
+    seller_id = client.post(
+        "/v1/commerce/sellers",
+        json={"name": "General Store", "checkout_session_url": "https://store.example.com/checkout_sessions"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    ).json()["seller_id"]
+    client.post(
+        f"/v1/commerce/sellers/{seller_id}/listings",
+        json={"listings": [
+            {"item_id": "sku-boots", "name": "Boots", "description": "hiking boot waterproof", "unit_amount": 12000},
+            {"item_id": "sku-socks", "name": "Socks", "description": "hiking boot waterproof wool socks", "unit_amount": 1500},
+        ]},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+
+    # "Process 1": search several times so both listings keep co-occurring
+    # and a real learned connection actually forms between them.
+    for _ in range(3):
+        client.post("/v1/commerce/search", json={"intent": "waterproof hiking boots"}, headers={"Authorization": f"Bearer {api_key}"})
+
+    # "Process 2": a fresh app, fresh closures/_key_memories cache, same
+    # underlying fresh_db -- register_commerce_routes runs its own
+    # module-level setup exactly like a real restart would.
+    app2 = _FastAPI()
+    commerce_router.register_commerce_routes(app2, server.engine, fresh_db, server.rate_limit, server._require_key)
+    client2 = _TestClient(app2)
+
+    resp = client2.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.json()["matches"][0]["memory_boost"] > 0.0, "learned affinity should have loaded from the DB, not started cold"

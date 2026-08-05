@@ -185,10 +185,70 @@ to locate the Spikeling engine, which silently fails
 (ModuleNotFoundError) under WSL -- where this service's real production
 process actually runs (see MIGRATE.md). commerce_spiking_memory.py
 checks SPIKELING_CORE_PATH, then both the native-Windows and
-WSL-mounted real paths, instead of assuming either. No persistence yet
-for the learned network itself -- a restart resets memory to cold; a
-disclosed v1 gap, not silent data loss (listings/cosine ranking are
-unaffected).
+WSL-mounted real paths, instead of assuming either.
+
+**Persisted across restarts, not just in-process (2026-08-04 hardening pass)**:
+learned STDP weights now round-trip through `commerce_memory_weights`
+(one row per learned src/dst/weight triple, per buyer key) -- a real bug
+this fixed, found by testing rather than assumed: recompiling the
+network to track a newly-seen listing used to reset EVERY synapse back
+to the seed weight, silently discarding real learned reinforcement any
+time a buyer's search surfaced something new, not just on restart.
+Fixed by snapshotting and reapplying weights around every rebuild
+(`to_rows()`/`_restore_rows()` in commerce_spiking_memory.py), then
+reusing the exact same mechanism for real cross-restart persistence.
+Also found and fixed: `memory_boost` originally read `heat()`
+(membrane_potential) only, a short-term signal deliberately NOT
+persisted -- meaning the newly-added persistence had zero visible
+effect on ranking. Fixed by blending in the learned connection strength
+to any co-returned candidate too, the actual persisted signal. Verified
+by registering commerce_router.py's routes a second time against the
+same database (a real simulated process restart, not a mock) and
+confirming a previously-learned pair's boost survives it.
+`heat()`/membrane_potential itself stays deliberately short-term and
+NOT persisted (see commerce_spiking_memory.py's module docstring for
+why) -- only the learned connection weights round-trip.
+
+**Hardened against spam/abuse**: seller registration and listing
+endpoints now rate-limited (previously only `/v1/commerce/search` was --
+a real gap, since registering unlimited sellers/listings had no cost or
+throttle at all), plus input validation (non-positive `unit_amount`
+rejected, a 200-listing-per-call / 2000-per-seller cap -- judgment
+calls, not measurements, disclosed as such).
+
+## Why this is a credible early mover in the ACP ecosystem, not just a demo
+
+Grounded in what's actually built and tested above, not aspiration:
+
+- **It fills a gap ACP's own spec explicitly leaves open.** The real
+  2026-04-17 OpenAPI schema has no seller_id/merchant_id field at all --
+  multi-seller discovery is named as future work for "the marketplace
+  layer above this API," which doesn't yet exist as a standard. Being a
+  real, working implementation of that gap while it's still open is a
+  timing advantage, not a claim of owning the spec.
+- **Real semantic matching, not a keyword directory.** Reuses OBSERVE's
+  own already-proven embedding search rather than bolting on a second,
+  weaker matching layer -- the same engine this whole product's search
+  quality already stands on.
+- **A feedback loop that actually persists and actually works**, not a
+  slide-deck feature: verified end-to-end (a real non-mocked HTTP call
+  producing a real archived record), verified to survive a real
+  simulated restart, and honestly scoped where it can't do more (see
+  "Honest limitations" below -- self-reported feedback, one-directional
+  reinforcement).
+- **Zero custody, zero payment liability by design.** Never touches
+  payment credentials, never proxies checkout, never holds funds -- the
+  same trust boundary a search engine has with a business it lists. For
+  anyone evaluating whether to integrate a discovery layer, that's a
+  materially smaller compliance/liability surface than a service that
+  sits in the payment path.
+- **Disclosed, not hidden, is the actual differentiator.** Every
+  limitation above (self-reported feedback, one-directional STDP
+  reinforcement, provisional blend-weight constants) is documented in
+  the code and here, not discovered by a customer after integrating.
+  That's the same discipline this whole product already leans on (see
+  the fine-tuning and quantization negative results elsewhere in this
+  README) applied to a new surface.
 
 ## Honest limitations (v1, disclosed not hidden)
 

@@ -122,17 +122,63 @@ class ListingAffinityMemory:
         self._name_map: Dict[str, str] = {}
         self.runtime: Optional[SpikelingRuntime] = None
 
+    def to_rows(self) -> List[tuple]:
+        """Real learned synapse weights as (src_item_id, dst_item_id,
+        weight) triples -- the actual persistent value of this memory.
+        Deliberately does NOT include membrane_potential/heat: that's a
+        fast-decaying short-term signal by design (see module docstring),
+        not worth preserving across a rebuild or a restart. Used both to
+        carry learned weights across an internal _rebuild (growing the
+        tracked set -- see the real bug this fixed, found by testing:
+        recompiling the network for a larger tracked set used to reset
+        EVERY synapse back to the seed weight, silently discarding real
+        learned reinforcement any time a buyer's search surfaced a
+        listing they hadn't seen before, which happens in normal
+        operation, not just at restart) and to save/restore this key's
+        memory across a process restart (see commerce_router.py)."""
+        if self.runtime is None:
+            return []
+        reverse = {v: k for k, v in self._name_map.items()}
+        return [(reverse[syn.src], reverse[syn.dst], syn.weight) for syn in self.runtime.synapses]
+
+    def _restore_rows(self, rows: List[tuple]) -> None:
+        """Applies previously-saved weights onto the CURRENT network. A
+        row whose src/dst isn't in the current tracked set is silently
+        skipped (that listing is gone, or wasn't included in this
+        rebuild), not an error."""
+        if self.runtime is None or not rows:
+            return
+        lookup = {(syn.src, syn.dst): syn for syn in self.runtime.synapses}
+        for src_item, dst_item, weight in rows:
+            src_name, dst_name = self._name_map.get(src_item), self._name_map.get(dst_item)
+            if src_name is None or dst_name is None:
+                continue
+            syn = lookup.get((src_name, dst_name))
+            if syn is not None:
+                syn.weight = weight
+
+    def load_rows(self, rows: List[tuple]) -> None:
+        """Restores a previously-saved memory (e.g. loaded from SQLite
+        after a process restart) -- rebuilds the tracked-listing network
+        from the rows' own item_ids (capped at MAX_TRACKED_LISTINGS, same
+        rule as live growth), then applies the saved weights. Call once,
+        right after construction, before any real observe_search calls."""
+        seen, item_ids = set(), []
+        for src_item, dst_item, _weight in rows:
+            for item in (src_item, dst_item):
+                if item not in seen:
+                    seen.add(item)
+                    item_ids.append(item)
+        if not item_ids:
+            return
+        self._rebuild(item_ids[:MAX_TRACKED_LISTINGS])
+        self._restore_rows(rows)
+
     def _rebuild(self, item_ids) -> None:
-        """Recompiles the network for the given tracked set. Real cost:
-        this throws away any previously-learned synapse weights for
-        listings that survive the rebuild -- acceptable here because a
-        rebuild only happens when growing to include a genuinely new
-        listing this key has never searched before, at which point
-        there's no learned history to lose for the new pair anyway, and
-        existing pairs re-accumulate quickly under real repeated use.
-        Not acceptable for a topology that changes on every request --
-        this is only called from observe_search when the tracked set
-        actually grows, not on every search."""
+        """Recompiles the network for the given tracked set, preserving
+        any already-learned weights for pairs that survive the rebuild
+        (see to_rows()'s docstring for the real bug this fixes)."""
+        previous_rows = self.to_rows()
         self._name_map = {i: _safe_neuron_name(i) for i in item_ids}
         if not self._name_map:
             self.runtime = None
@@ -140,6 +186,7 @@ class ListingAffinityMemory:
         ast = _compile_network(self._name_map.values(), self._threshold, self._leak,
                                 self._seed_weight, self._learn_rate)
         self.runtime = SpikelingRuntime(ast)
+        self._restore_rows(previous_rows)
 
     def observe_search(self, ranked_item_ids: List[str], timestamp_ms: float,
                         top_drive: float = DEFAULT_TOP_HIT_DRIVE,

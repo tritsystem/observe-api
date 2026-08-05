@@ -107,6 +107,21 @@ def init_db():
                 created_at REAL NOT NULL
             )
         """)
+        # Persists ListingAffinityMemory's real learned STDP weights per
+        # buyer key, so a process restart doesn't silently discard
+        # learned affinity -- see commerce_router.py's _get_memory() and
+        # commerce_spiking_memory.py's to_rows()/load_rows(). Deliberately
+        # does NOT persist membrane_potential/heat (short-term, decays
+        # fast by design -- not worth the write volume).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS commerce_memory_weights (
+                key_hash TEXT NOT NULL,
+                src_item TEXT NOT NULL,
+                dst_item TEXT NOT NULL,
+                weight REAL NOT NULL,
+                PRIMARY KEY (key_hash, src_item, dst_item)
+            )
+        """)
 
 
 def create_api_key(email: str, initial_credits: int = 0) -> str:

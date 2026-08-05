@@ -54,6 +54,14 @@ import obsidian_memory
 
 CREDITS_PER_COMMERCE_SEARCH_DEFAULT = 1
 
+# Spam/abuse bounds -- judgment calls, not measurements (no real
+# marketplace traffic exists yet to size these against). Real gap this
+# closes: registration/listing endpoints had no rate limiting at all
+# (only /v1/commerce/search did), so a single key could otherwise spam
+# unbounded sellers/listings with no cost or throttle.
+MAX_LISTINGS_PER_CALL = 200
+MAX_LISTINGS_PER_SELLER = 2000
+
 # How much a listing's learned affinity heat can nudge its rank, relative
 # to cosine similarity (which stays the primary signal -- see
 # commerce_spiking_memory.py's module docstring for why this is additive,
@@ -156,19 +164,45 @@ class FeedbackResponse(BaseModel):
 def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_fn, credits_per_search: int = CREDITS_PER_COMMERCE_SEARCH_DEFAULT):
     # Per-buyer-key learned listing-affinity memory (real Spikeling STDP,
     # see commerce_spiking_memory.py) -- one ListingAffinityMemory per
-    # key_hash, created lazily on that key's first search and kept for
-    # the life of this process. A restart resets learned affinity to
-    # cold; that's a disclosed v1 limitation (no persistence layer for
-    # the network's synapse weights yet), not silent data loss of
-    # anything else -- the underlying listings/cosine ranking are
-    # unaffected, only the additive memory_boost signal resets.
+    # key_hash, in-process cache for the life of this process, backed by
+    # commerce_memory_weights so a restart doesn't discard real learned
+    # affinity (see _get_memory/_save_memory below). membrane_potential/
+    # heat itself is NOT persisted (short-term signal by design), only
+    # the learned synapse weights.
     _key_memories: Dict[str, commerce_spiking_memory.ListingAffinityMemory] = {}
+
+    def _get_memory(key_hash: str) -> commerce_spiking_memory.ListingAffinityMemory:
+        if key_hash in _key_memories:
+            return _key_memories[key_hash]
+        memory = commerce_spiking_memory.ListingAffinityMemory()
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT src_item, dst_item, weight FROM commerce_memory_weights WHERE key_hash = ?",
+                (key_hash,),
+            ).fetchall()
+        if rows:
+            memory.load_rows([(r["src_item"], r["dst_item"], r["weight"]) for r in rows])
+        _key_memories[key_hash] = memory
+        return memory
+
+    def _save_memory(key_hash: str, memory: commerce_spiking_memory.ListingAffinityMemory) -> None:
+        rows = memory.to_rows()
+        with db.get_conn() as conn:
+            conn.execute("DELETE FROM commerce_memory_weights WHERE key_hash = ?", (key_hash,))
+            conn.executemany(
+                "INSERT INTO commerce_memory_weights (key_hash, src_item, dst_item, weight) VALUES (?, ?, ?, ?)",
+                [(key_hash, src, dst, weight) for src, dst, weight in rows],
+            )
 
     @app.post("/v1/commerce/sellers", response_model=SellerRegisterResponse)
     def register_seller(req: SellerRegisterRequest, authorization: Optional[str] = Header(None)):
         raw_key = require_key_fn(authorization)
+        if not rate_limit.allow(raw_key):
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
         if not req.checkout_session_url.startswith("https://"):
             raise HTTPException(status_code=400, detail="checkout_session_url must be https -- ACP checkout sessions carry payment intent, never serve this over plain http")
+        if not req.name.strip():
+            raise HTTPException(status_code=400, detail="name must not be empty")
         key_hash = db.hash_key(raw_key)
         with db.get_conn() as conn:
             cur = conn.execute(
@@ -181,6 +215,18 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
     @app.post("/v1/commerce/sellers/{seller_id}/listings", response_model=ListingsAddResponse)
     def add_listings(seller_id: int, req: ListingsAddRequest, authorization: Optional[str] = Header(None)):
         raw_key = require_key_fn(authorization)
+        if not rate_limit.allow(raw_key):
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
+        if not req.listings:
+            raise HTTPException(status_code=400, detail="listings must not be empty")
+        if len(req.listings) > MAX_LISTINGS_PER_CALL:
+            raise HTTPException(status_code=400, detail=f"at most {MAX_LISTINGS_PER_CALL} listings per call")
+        for listing in req.listings:
+            if listing.unit_amount is not None and listing.unit_amount <= 0:
+                raise HTTPException(status_code=400, detail=f"unit_amount must be positive if set (item_id={listing.item_id})")
+            if not listing.item_id.strip() or not listing.name.strip():
+                raise HTTPException(status_code=400, detail="item_id and name must not be empty")
+
         key_hash = db.hash_key(raw_key)
         with db.get_conn() as conn:
             seller = conn.execute(
@@ -190,6 +236,16 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
             raise HTTPException(status_code=404, detail="no seller with that id owned by this API key")
         if not engine.ready or engine.model is None:
             raise HTTPException(status_code=503, detail="search engine not ready yet")
+
+        with db.get_conn() as conn:
+            existing_count = conn.execute(
+                "SELECT COUNT(*) AS n FROM commerce_listings WHERE seller_id = ?", (seller_id,)
+            ).fetchone()["n"]
+        if existing_count + len(req.listings) > MAX_LISTINGS_PER_SELLER:
+            raise HTTPException(
+                status_code=400,
+                detail=f"this would exceed the {MAX_LISTINGS_PER_SELLER}-listing cap per seller ({existing_count} existing)",
+            )
 
         texts = [f"{l.name}. {l.description}" for l in req.listings]
         vecs = engine.model.encode(texts, normalize_embeddings=True).astype("float32")
@@ -250,19 +306,49 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
         # "sku-1" must not be treated as the same listing by the learned
         # affinity network.
         key_hash = db.hash_key(raw_key)
-        memory = _key_memories.setdefault(key_hash, commerce_spiking_memory.ListingAffinityMemory())
+        memory = _get_memory(key_hash)
         now_ms = time.time() * 1000.0
         memory.decay(now_ms)
+
+        candidate_ids = [f"{row['seller_id']}:{row['item_id']}" for _cosine, row in scored]
 
         blended = []
         for cosine, row in scored:
             composite_id = f"{row['seller_id']}:{row['item_id']}"
-            # Heat reflects PAST searches only -- read before this
-            # search's own observe_search call below, so a listing can
-            # never boost itself from the very search that's computing
-            # its rank right now.
+            # Two real signals read here, both reflecting PAST searches
+            # only (read before this search's own observe_search call
+            # below, so a listing can never boost itself from the very
+            # search computing its rank right now):
+            #
+            # 1. heat -- short-term/decaying (membrane_potential), "has
+            #    this been recently active." Deliberately NOT persisted
+            #    across a restart (see commerce_spiking_memory.py).
+            # 2. learned connection strength to any OTHER candidate in
+            #    THIS SAME result batch -- the long-term, persisted STDP
+            #    signal (see _save_memory/_get_memory above). Real bug
+            #    this fixes, found by testing: memory_boost used to read
+            #    heat only, so persisting synapse weights across a
+            #    restart had zero visible effect on ranking -- the one
+            #    thing persistence is actually for.
             heat = memory.heat(composite_id)
-            boost = MEMORY_BLEND_WEIGHT * min(1.0, heat / commerce_spiking_memory.DEFAULT_THRESHOLD)
+            heat_component = min(1.0, heat / commerce_spiking_memory.DEFAULT_THRESHOLD)
+
+            best_connection = 0.0
+            for other_id in candidate_ids:
+                if other_id == composite_id:
+                    continue
+                conn = memory.learned_connection(other_id, composite_id)
+                if conn is not None:
+                    best_connection = max(best_connection, conn)
+            # Learned weights start at DEFAULT_SEED_WEIGHT and grow from
+            # there -- normalized relative to the seed, not to threshold
+            # (a totally different scale). 4x seed is a judgment call
+            # for "meaningfully learned," not a measurement (no real
+            # usage data exists yet to tune this against).
+            seed = commerce_spiking_memory.DEFAULT_SEED_WEIGHT
+            connection_component = min(1.0, max(0.0, best_connection - seed) / (3 * seed))
+
+            boost = MEMORY_BLEND_WEIGHT * min(1.0, heat_component + connection_component)
             blended.append((cosine + boost, cosine, boost, row, composite_id))
         blended.sort(key=lambda t: -t[0])
 
@@ -280,6 +366,7 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
         # actually returned -- affects FUTURE searches for this key, not
         # this one (see the heat-read-before-observe ordering above).
         memory.observe_search([composite_id for *_rest, composite_id in top], now_ms)
+        _save_memory(key_hash, memory)
 
         record = db.get_key_record(raw_key)
         return CommerceSearchResponse(matches=matches, credits_remaining=record["credits"])
@@ -334,11 +421,12 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
 
         reinforced = False
         if req.outcome == "purchased":
-            memory = _key_memories.setdefault(key_hash, commerce_spiking_memory.ListingAffinityMemory())
+            memory = _get_memory(key_hash)
             now_ms = time.time() * 1000.0
             memory.decay(now_ms)
             composite_id = f"{req.seller_id}:{req.item_id}"
             memory.observe_search([composite_id], now_ms, top_drive=CONFIRMED_PURCHASE_DRIVE)
+            _save_memory(key_hash, memory)
             reinforced = True
 
             with db.get_conn() as conn:
