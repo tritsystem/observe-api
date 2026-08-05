@@ -104,10 +104,15 @@ class ListingsAddResponse(BaseModel):
 
 
 class CommerceSearchRequest(BaseModel):
-    intent: str
+    intent: Optional[str] = None
     max_price: Optional[int] = None  # minor currency units
     category: Optional[str] = None
     k: int = 10
+    # References a saved commerce_buyer_agents row (see the dashboard/
+    # import models below) -- when given, any of intent/max_price/category
+    # left unset here falls back to that profile's saved default. intent
+    # must come from one or the other; a call with neither is a 400.
+    buyer_agent_id: Optional[int] = None
 
 
 class CommerceMatch(BaseModel):
@@ -264,6 +269,65 @@ def _compute_tier(buyer_confirmed: int, seller_confirmed: int, disputes: int) ->
     return "new"
 
 
+# ---------- Dashboard / universal setup: sellers-with-listings, buyer-agent
+# configs, and bulk import. All of this is CONFIGURATION only -- it creates
+# and lists rows in the tables above, nothing here runs an agent loop. An
+# external caller (a hand-written script, a LangChain/CrewAI tool, the
+# dashboard's own "test search" button) still has to make the actual
+# /v1/commerce/search or /v1/commerce/feedback call itself.
+
+class ListingOut(BaseModel):
+    item_id: str
+    name: str
+    description: str
+    unit_amount: Optional[int]
+    currency: str
+    category: Optional[str]
+
+
+class SellerWithListings(BaseModel):
+    seller_id: int
+    name: str
+    checkout_session_url: str
+    listings: List[ListingOut]
+
+
+class BuyerAgentIn(BaseModel):
+    name: str
+    default_intent: str
+    max_price: Optional[int] = None
+    category: Optional[str] = None
+
+
+class BuyerAgentOut(BaseModel):
+    id: int
+    name: str
+    default_intent: str
+    max_price: Optional[int]
+    category: Optional[str]
+
+
+class DeleteResponse(BaseModel):
+    deleted: bool
+
+
+class SellerImport(BaseModel):
+    name: str
+    checkout_session_url: str
+    listings: List[ListingIn] = []
+
+
+class ImportRequest(BaseModel):
+    sellers: List[SellerImport] = []
+    buyer_agents: List[BuyerAgentIn] = []
+
+
+class ImportResponse(BaseModel):
+    sellers_created: int
+    listings_created: int
+    buyer_agents_created: int
+
+
 def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_fn, credits_per_search: int = CREDITS_PER_COMMERCE_SEARCH_DEFAULT):
     # Per-buyer-key learned listing-affinity memory (real Spikeling STDP,
     # see commerce_spiking_memory.py) -- one ListingAffinityMemory per
@@ -321,40 +385,32 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
             _commerce_indices[db_path] = commerce_search_index.CommerceVectorIndex(dim, index_path)
         return _commerce_indices[db_path]
 
-    @app.post("/v1/commerce/sellers", response_model=SellerRegisterResponse)
-    def register_seller(req: SellerRegisterRequest, authorization: Optional[str] = Header(None)):
-        raw_key = require_key_fn(authorization)
-        if not rate_limit.allow(raw_key):
-            raise HTTPException(status_code=429, detail="rate limit exceeded")
-        if not req.checkout_session_url.startswith("https://"):
+    def _create_seller(key_hash: str, name: str, checkout_session_url: str) -> int:
+        """Shared by the single-seller route and /v1/commerce/import so
+        both go through identical validation -- no second copy to drift."""
+        if not checkout_session_url.startswith("https://"):
             raise HTTPException(status_code=400, detail="checkout_session_url must be https -- ACP checkout sessions carry payment intent, never serve this over plain http")
-        if not req.name.strip():
+        if not name.strip():
             raise HTTPException(status_code=400, detail="name must not be empty")
-        key_hash = db.hash_key(raw_key)
         with db.get_conn() as conn:
             cur = conn.execute(
                 "INSERT INTO commerce_sellers (key_hash, name, checkout_session_url, created_at) VALUES (?, ?, ?, ?)",
-                (key_hash, req.name, req.checkout_session_url, time.time()),
+                (key_hash, name, checkout_session_url, time.time()),
             )
-            seller_id = cur.lastrowid
-        return SellerRegisterResponse(seller_id=seller_id)
+            return cur.lastrowid
 
-    @app.post("/v1/commerce/sellers/{seller_id}/listings", response_model=ListingsAddResponse)
-    def add_listings(seller_id: int, req: ListingsAddRequest, authorization: Optional[str] = Header(None)):
-        raw_key = require_key_fn(authorization)
-        if not rate_limit.allow(raw_key):
-            raise HTTPException(status_code=429, detail="rate limit exceeded")
-        if not req.listings:
+    def _create_listings(key_hash: str, seller_id: int, listings: List[ListingIn]) -> int:
+        """Shared by the single-seller route and /v1/commerce/import."""
+        if not listings:
             raise HTTPException(status_code=400, detail="listings must not be empty")
-        if len(req.listings) > MAX_LISTINGS_PER_CALL:
+        if len(listings) > MAX_LISTINGS_PER_CALL:
             raise HTTPException(status_code=400, detail=f"at most {MAX_LISTINGS_PER_CALL} listings per call")
-        for listing in req.listings:
+        for listing in listings:
             if listing.unit_amount is not None and listing.unit_amount <= 0:
                 raise HTTPException(status_code=400, detail=f"unit_amount must be positive if set (item_id={listing.item_id})")
             if not listing.item_id.strip() or not listing.name.strip():
                 raise HTTPException(status_code=400, detail="item_id and name must not be empty")
 
-        key_hash = db.hash_key(raw_key)
         with db.get_conn() as conn:
             seller = conn.execute(
                 "SELECT * FROM commerce_sellers WHERE id = ? AND key_hash = ?", (seller_id, key_hash)
@@ -368,17 +424,17 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
             existing_count = conn.execute(
                 "SELECT COUNT(*) AS n FROM commerce_listings WHERE seller_id = ?", (seller_id,)
             ).fetchone()["n"]
-        if existing_count + len(req.listings) > MAX_LISTINGS_PER_SELLER:
+        if existing_count + len(listings) > MAX_LISTINGS_PER_SELLER:
             raise HTTPException(
                 status_code=400,
                 detail=f"this would exceed the {MAX_LISTINGS_PER_SELLER}-listing cap per seller ({existing_count} existing)",
             )
 
-        texts = [f"{l.name}. {l.description}" for l in req.listings]
+        texts = [f"{l.name}. {l.description}" for l in listings]
         vecs = engine.model.encode(texts, normalize_embeddings=True).astype("float32")
         row_ids = []
         with db.get_conn() as conn:
-            for listing, vec in zip(req.listings, vecs):
+            for listing, vec in zip(listings, vecs):
                 # embedding column kept for schema compatibility (NOT
                 # NULL) but no longer written or read as a real vector --
                 # the FAISS index below is now the single source of
@@ -397,7 +453,151 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
 
         commerce_index = _get_commerce_index(vecs.shape[1])
         commerce_index.add(row_ids, vecs)
-        return ListingsAddResponse(added=len(req.listings))
+        return len(listings)
+
+    @app.post("/v1/commerce/sellers", response_model=SellerRegisterResponse)
+    def register_seller(req: SellerRegisterRequest, authorization: Optional[str] = Header(None)):
+        raw_key = require_key_fn(authorization)
+        if not rate_limit.allow(raw_key):
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
+        seller_id = _create_seller(db.hash_key(raw_key), req.name, req.checkout_session_url)
+        return SellerRegisterResponse(seller_id=seller_id)
+
+    @app.post("/v1/commerce/sellers/{seller_id}/listings", response_model=ListingsAddResponse)
+    def add_listings(seller_id: int, req: ListingsAddRequest, authorization: Optional[str] = Header(None)):
+        raw_key = require_key_fn(authorization)
+        if not rate_limit.allow(raw_key):
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
+        added = _create_listings(db.hash_key(raw_key), seller_id, req.listings)
+        return ListingsAddResponse(added=added)
+
+    @app.get("/v1/commerce/my-sellers", response_model=List[SellerWithListings])
+    def my_sellers(authorization: Optional[str] = Header(None)):
+        """For a dashboard: everything this API key has registered as a
+        seller, with its listings nested -- there was previously no way
+        to see this without remembering seller_id from the original
+        register_seller response."""
+        raw_key = require_key_fn(authorization)
+        key_hash = db.hash_key(raw_key)
+        with db.get_conn() as conn:
+            sellers = conn.execute(
+                "SELECT * FROM commerce_sellers WHERE key_hash = ? ORDER BY created_at DESC", (key_hash,)
+            ).fetchall()
+            out = []
+            for s in sellers:
+                listings = conn.execute(
+                    "SELECT * FROM commerce_listings WHERE seller_id = ? ORDER BY created_at DESC", (s["id"],)
+                ).fetchall()
+                out.append(SellerWithListings(
+                    seller_id=s["id"], name=s["name"], checkout_session_url=s["checkout_session_url"],
+                    listings=[
+                        ListingOut(item_id=l["item_id"], name=l["name"], description=l["description"],
+                                   unit_amount=l["unit_amount"], currency=l["currency"], category=l["category"])
+                        for l in listings
+                    ],
+                ))
+        return out
+
+    @app.post("/v1/commerce/buyer-agents", response_model=BuyerAgentOut)
+    def create_buyer_agent(req: BuyerAgentIn, authorization: Optional[str] = Header(None)):
+        """A saved buyer-agent CONFIGURATION, not a running process --
+        see db.py's commerce_buyer_agents comment. Lets an external agent
+        (any framework) reference buyer_agent_id in /v1/commerce/search
+        instead of repeating the same intent/filters on every call."""
+        raw_key = require_key_fn(authorization)
+        if not rate_limit.allow(raw_key):
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
+        if not req.name.strip():
+            raise HTTPException(status_code=400, detail="name must not be empty")
+        if not req.default_intent.strip():
+            raise HTTPException(status_code=400, detail="default_intent must not be empty")
+        if req.max_price is not None and req.max_price <= 0:
+            raise HTTPException(status_code=400, detail="max_price must be positive if set")
+        key_hash = db.hash_key(raw_key)
+        with db.get_conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO commerce_buyer_agents (key_hash, name, default_intent, max_price, category, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (key_hash, req.name, req.default_intent, req.max_price, req.category, time.time()),
+            )
+            agent_id = cur.lastrowid
+        return BuyerAgentOut(id=agent_id, name=req.name, default_intent=req.default_intent,
+                              max_price=req.max_price, category=req.category)
+
+    @app.get("/v1/commerce/buyer-agents", response_model=List[BuyerAgentOut])
+    def list_buyer_agents(authorization: Optional[str] = Header(None)):
+        raw_key = require_key_fn(authorization)
+        key_hash = db.hash_key(raw_key)
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM commerce_buyer_agents WHERE key_hash = ? ORDER BY created_at DESC", (key_hash,)
+            ).fetchall()
+        return [
+            BuyerAgentOut(id=r["id"], name=r["name"], default_intent=r["default_intent"],
+                          max_price=r["max_price"], category=r["category"])
+            for r in rows
+        ]
+
+    @app.delete("/v1/commerce/buyer-agents/{agent_id}", response_model=DeleteResponse)
+    def delete_buyer_agent(agent_id: int, authorization: Optional[str] = Header(None)):
+        raw_key = require_key_fn(authorization)
+        key_hash = db.hash_key(raw_key)
+        with db.get_conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM commerce_buyer_agents WHERE id = ? AND key_hash = ?", (agent_id, key_hash)
+            )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="no buyer agent with that id owned by this API key")
+        return DeleteResponse(deleted=True)
+
+    @app.post("/v1/commerce/import", response_model=ImportResponse)
+    def commerce_import(req: ImportRequest, authorization: Optional[str] = Header(None)):
+        """Universal onboarding path: paste a JSON description of sellers
+        (with their listings) and/or buyer-agent profiles instead of
+        making one call per seller and one per listing batch. Same
+        validation, same underlying tables, as the individual endpoints
+        above -- this is a convenience wrapper, not a second data model.
+        Partial-batch semantics: sellers are created one at a time and a
+        failure on one (e.g. bad checkout_session_url) stops the import
+        with the count of what succeeded before it, rather than either
+        silently skipping bad entries or rolling back ones that already
+        committed -- SQLite autocommit per statement here means a
+        already-created seller from earlier in the same request really
+        did get created, and hiding that would be a real inconsistency
+        between what this response says and what /v1/commerce/my-sellers
+        would show right after."""
+        raw_key = require_key_fn(authorization)
+        if not rate_limit.allow(raw_key):
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
+        key_hash = db.hash_key(raw_key)
+
+        sellers_created = 0
+        listings_created = 0
+        buyer_agents_created = 0
+
+        for s in req.sellers:
+            seller_id = _create_seller(key_hash, s.name, s.checkout_session_url)
+            sellers_created += 1
+            if s.listings:
+                listings_created += _create_listings(key_hash, seller_id, s.listings)
+
+        for ba in req.buyer_agents:
+            if not ba.name.strip() or not ba.default_intent.strip():
+                raise HTTPException(status_code=400, detail="buyer agent name and default_intent must not be empty")
+            if ba.max_price is not None and ba.max_price <= 0:
+                raise HTTPException(status_code=400, detail="buyer agent max_price must be positive if set")
+            with db.get_conn() as conn:
+                conn.execute(
+                    "INSERT INTO commerce_buyer_agents (key_hash, name, default_intent, max_price, category, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (key_hash, ba.name, ba.default_intent, ba.max_price, ba.category, time.time()),
+                )
+            buyer_agents_created += 1
+
+        return ImportResponse(
+            sellers_created=sellers_created, listings_created=listings_created,
+            buyer_agents_created=buyer_agents_created,
+        )
 
     def _do_commerce_search(intent: str, max_price: Optional[int], category: Optional[str], k: int, raw_key: str) -> List[CommerceMatch]:
         """The actual search/rank/learn logic, factored out of the
@@ -551,13 +751,32 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
         raw_key = require_key_fn(authorization)
         if not rate_limit.allow(raw_key):
             raise HTTPException(status_code=429, detail="rate limit exceeded")
+
+        intent, max_price, category = req.intent, req.max_price, req.category
+        if req.buyer_agent_id is not None:
+            key_hash = db.hash_key(raw_key)
+            with db.get_conn() as conn:
+                agent = conn.execute(
+                    "SELECT * FROM commerce_buyer_agents WHERE id = ? AND key_hash = ?",
+                    (req.buyer_agent_id, key_hash),
+                ).fetchone()
+            if agent is None:
+                raise HTTPException(status_code=404, detail="no buyer agent with that id owned by this API key")
+            # Explicit fields in this call win; a profile only fills in
+            # what the caller didn't already specify.
+            intent = intent if intent is not None else agent["default_intent"]
+            max_price = max_price if max_price is not None else agent["max_price"]
+            category = category if category is not None else agent["category"]
+        if not intent:
+            raise HTTPException(status_code=400, detail="intent is required, either directly or via a buyer_agent_id with a saved default_intent")
+
         if not db.deduct_credit(raw_key, credits_per_search):
             raise HTTPException(status_code=402, detail="insufficient credits")
         if not engine.ready or engine.model is None:
             db.deduct_credit(raw_key, -credits_per_search)
             raise HTTPException(status_code=503, detail="search engine not ready yet")
 
-        matches = _do_commerce_search(req.intent, req.max_price, req.category, req.k, raw_key)
+        matches = _do_commerce_search(intent, max_price, category, req.k, raw_key)
         record = db.get_key_record(raw_key)
         return CommerceSearchResponse(matches=matches, credits_remaining=record["credits"])
 

@@ -1,0 +1,440 @@
+<title>OBSERVE — commerce dashboard</title>
+<meta name="description" content="Set up seller listings and buyer-agent profiles for OBSERVE's agent commerce marketplace, import them in bulk, or generate integration snippets for any agent framework." />
+
+<style>
+  :root {
+    --paper: #F1EFE7;
+    --paper-raised: #E8E4D8;
+    --ink: #1C1E1A;
+    --ink-soft: #4A4A42;
+    --muted: #8B8577;
+    --line: #D8D3C4;
+    --accent: #3E7269;
+    --bad: #A0522D;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #15181A; --paper-raised: #1D2123; --ink: #E8E6DE;
+      --ink-soft: #B8B4A6; --muted: #7A7668; --line: #2C3032;
+      --accent: #6FAB9E; --bad: #C97B54;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #15181A; --paper-raised: #1D2123; --ink: #E8E6DE;
+    --ink-soft: #B8B4A6; --muted: #7A7668; --line: #2C3032;
+    --accent: #6FAB9E; --bad: #C97B54;
+  }
+  :root[data-theme="light"] {
+    --paper: #F1EFE7; --paper-raised: #E8E4D8; --ink: #1C1E1A;
+    --ink-soft: #4A4A42; --muted: #8B8577; --line: #D8D3C4;
+    --accent: #3E7269; --bad: #A0522D;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--paper); }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: Optima, Candara, "Noto Sans", "Segoe UI", sans-serif;
+    font-size: 16px; line-height: 1.55; -webkit-font-smoothing: antialiased;
+  }
+  .display { font-family: "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif; }
+  .mono { font-family: ui-monospace, "SF Mono", Consolas, "Roboto Mono", Menlo, monospace; font-size: 0.85rem; }
+  a { color: var(--accent); }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 40px 28px 88px; }
+  h1.display { font-size: 2rem; font-weight: 400; margin: 0 0 8px; }
+  .sub { color: var(--muted); font-size: 0.95rem; margin: 0 0 32px; }
+  section {
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 22px 24px; margin-bottom: 20px; background: var(--paper-raised);
+  }
+  h2 { font-size: 1.15rem; font-weight: 500; margin: 0 0 6px; }
+  .hint { color: var(--muted); font-size: 0.85rem; margin: 0 0 16px; }
+  label { display: block; font-size: 0.82rem; color: var(--muted); margin: 12px 0 4px; }
+  input[type="text"], input[type="number"], input[type="email"], textarea, select {
+    width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 5px;
+    background: var(--paper); color: var(--ink); font-size: 0.92rem; font-family: inherit;
+  }
+  textarea { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 0.82rem; min-height: 120px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row > * { flex: 1; min-width: 160px; }
+  button {
+    padding: 9px 18px; border-radius: 5px; border: 1px solid var(--ink);
+    background: var(--ink); color: var(--paper); font-size: 0.88rem; cursor: pointer; margin-top: 14px;
+  }
+  button.line { background: transparent; color: var(--ink); border-color: var(--line); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .status { font-size: 0.85rem; color: var(--muted); margin-top: 8px; min-height: 1.2em; }
+  .item {
+    border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px;
+    margin-top: 10px; background: var(--paper);
+  }
+  .item .title { font-weight: 500; font-size: 0.95rem; }
+  .item .meta { color: var(--muted); font-size: 0.8rem; margin-top: 2px; }
+  .listing-row { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 8px; font-size: 0.85rem; }
+  .pill {
+    display: inline-block; border: 1px solid var(--line); border-radius: 999px;
+    padding: 3px 10px; font-size: 0.75rem; color: var(--ink-soft); margin-right: 6px;
+  }
+  .top-bar { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 6px; }
+  .top-bar > div { flex: 1; min-width: 260px; }
+  .key-saved { font-size: 0.8rem; color: var(--accent); margin-top: 6px; }
+  code.inline { background: var(--paper); border: 1px solid var(--line); border-radius: 3px; padding: 1px 5px; font-size: 0.85em; }
+  pre.snippet {
+    background: var(--paper); border: 1px solid var(--line); border-radius: 5px;
+    padding: 14px; overflow-x: auto; font-size: 0.78rem; margin: 10px 0 0; white-space: pre;
+  }
+  .locked { opacity: 0.5; pointer-events: none; }
+</style>
+
+<div class="wrap">
+  <h1 class="display">Commerce dashboard</h1>
+  <p class="sub">
+    Set up your own sellers and buyer-agents, import them in bulk, or grab
+    a ready-to-use snippet for any agent framework. This page is a
+    configuration UI over the real, live API — nothing here runs an agent
+    loop on its own; something still has to call
+    <code class="inline">/v1/commerce/search</code> to actually search.
+    Back to the <a href="/">main page</a>.
+  </p>
+
+  <section>
+    <h2>Your API key</h2>
+    <p class="hint">
+      Stored only in this browser (localStorage), sent only to
+      api.observe-search.online. Don't have one? Get a free one on the
+      <a href="/#pricing">main page</a> first.
+    </p>
+    <div class="top-bar">
+      <div>
+        <input type="text" id="api-key" placeholder="obs_..." autocomplete="off" />
+      </div>
+      <button id="save-key">Use this key</button>
+    </div>
+    <div class="status" id="key-status"></div>
+  </section>
+
+  <div id="locked-notice" class="status" style="margin: -8px 0 20px;">Enter an API key above to unlock the sections below.</div>
+
+  <div id="gated-sections" class="locked">
+    <section>
+      <h2>Your sellers</h2>
+      <p class="hint">Register a seller (free), then add listings to it. Both are real -- listings become searchable immediately.</p>
+      <div id="sellers-list"></div>
+
+      <div style="margin-top:18px; border-top:1px solid var(--line); padding-top:14px;">
+        <label>Seller name</label>
+        <input type="text" id="seller-name" placeholder="Trailhead Outfitters" />
+        <label>Checkout session URL (your real ACP endpoint, https only)</label>
+        <input type="text" id="seller-url" placeholder="https://yourstore.example.com/checkout_sessions" />
+        <button id="register-seller">Register seller</button>
+        <div class="status" id="seller-status"></div>
+      </div>
+
+      <div style="margin-top:18px; border-top:1px solid var(--line); padding-top:14px;">
+        <label>Add listings to seller (pick one below, or type its id)</label>
+        <select id="listing-seller-select"><option value="">-- choose a seller --</option></select>
+        <label>Listings JSON</label>
+        <textarea id="listings-json">[{"item_id":"sku-1","name":"Waterproof Hiking Boots","description":"Rugged waterproof boots for muddy trails","unit_amount":12000}]</textarea>
+        <button id="add-listings">Add listings</button>
+        <div class="status" id="listings-status"></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Your buyer-agent profiles</h2>
+      <p class="hint">
+        A saved configuration (name, default intent, price ceiling), not a
+        running process. Any agent -- yours, LangChain, CrewAI, a raw curl
+        call -- can reference <code class="inline">buyer_agent_id</code> in
+        <code class="inline">/v1/commerce/search</code> instead of repeating
+        the same intent every call.
+      </p>
+      <div id="agents-list"></div>
+
+      <div style="margin-top:18px; border-top:1px solid var(--line); padding-top:14px;">
+        <label>Name</label>
+        <input type="text" id="agent-name" placeholder="Trail Shopper" />
+        <label>Default intent</label>
+        <input type="text" id="agent-intent" placeholder="waterproof boots for a muddy trail" />
+        <div class="row">
+          <div>
+            <label>Max price (cents, optional)</label>
+            <input type="number" id="agent-max-price" placeholder="15000" />
+          </div>
+          <div>
+            <label>Category (optional)</label>
+            <input type="text" id="agent-category" placeholder="" />
+          </div>
+        </div>
+        <button id="create-agent">Create buyer agent</button>
+        <div class="status" id="agent-status"></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Bulk import</h2>
+      <p class="hint">
+        Already have sellers/listings/buyer-agents defined elsewhere?
+        Paste one JSON payload instead of filling forms one at a time.
+      </p>
+      <textarea id="import-json" style="min-height:180px;">{
+  "sellers": [
+    {
+      "name": "Trailhead Outfitters",
+      "checkout_session_url": "https://trailhead.example.com/checkout_sessions",
+      "listings": [
+        {"item_id": "boots-1", "name": "Waterproof Hiking Boots", "description": "Rugged waterproof boots for muddy trails", "unit_amount": 12000}
+      ]
+    }
+  ],
+  "buyer_agents": [
+    {"name": "Trail Shopper", "default_intent": "waterproof boots for a muddy trail", "max_price": 15000}
+  ]
+}</textarea>
+      <button id="run-import">Import</button>
+      <div class="status" id="import-status"></div>
+    </section>
+
+    <section>
+      <h2>Universal integration snippet</h2>
+      <p class="hint">Pick a buyer-agent profile and a framework -- copy the snippet into whatever's actually running your agent.</p>
+      <div class="row">
+        <div>
+          <label>Buyer agent</label>
+          <select id="snippet-agent-select"><option value="">-- ad hoc intent (no saved profile) --</option></select>
+        </div>
+        <div>
+          <label>Framework</label>
+          <select id="snippet-framework">
+            <option value="curl">Raw HTTP (curl)</option>
+            <option value="python">Python (requests)</option>
+            <option value="langchain">LangChain tool</option>
+            <option value="crewai">CrewAI tool</option>
+          </select>
+        </div>
+      </div>
+      <pre class="snippet mono" id="snippet-output"></pre>
+      <button class="line" id="copy-snippet">Copy</button>
+    </section>
+  </div>
+</div>
+
+<script>
+(function () {
+  var API = "https://api.observe-search.online";
+  var els = {};
+  ["api-key","save-key","key-status","locked-notice","gated-sections",
+   "sellers-list","seller-name","seller-url","register-seller","seller-status",
+   "listing-seller-select","listings-json","add-listings","listings-status",
+   "agents-list","agent-name","agent-intent","agent-max-price","agent-category","create-agent","agent-status",
+   "import-json","run-import","import-status",
+   "snippet-agent-select","snippet-framework","snippet-output","copy-snippet"
+  ].forEach(function (id) { els[id] = document.getElementById(id); });
+
+  var state = { apiKey: localStorage.getItem("observe_dashboard_key") || "", sellers: [], agents: [] };
+
+  function esc(s) {
+    var d = document.createElement("div");
+    d.textContent = s == null ? "" : String(s);
+    return d.innerHTML;
+  }
+
+  function api(path, method, body) {
+    var headers = { "Content-Type": "application/json" };
+    if (state.apiKey) headers["Authorization"] = "Bearer " + state.apiKey;
+    return fetch(API + path, { method: method, headers: headers, body: body ? JSON.stringify(body) : undefined })
+      .then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (data) {
+          return { ok: res.ok, status: res.status, data: data };
+        });
+      });
+  }
+
+  function setLocked(locked) {
+    els["gated-sections"].className = locked ? "locked" : "";
+    els["locked-notice"].style.display = locked ? "block" : "none";
+  }
+
+  function refreshAll() {
+    if (!state.apiKey) return;
+    api("/v1/commerce/my-sellers", "GET").then(function (r) {
+      if (r.ok) { state.sellers = r.data; renderSellers(); }
+    });
+    api("/v1/commerce/buyer-agents", "GET").then(function (r) {
+      if (r.ok) { state.agents = r.data; renderAgents(); }
+    });
+  }
+
+  function renderSellers() {
+    els["sellers-list"].innerHTML = state.sellers.length
+      ? state.sellers.map(function (s) {
+          var listings = s.listings.map(function (l) {
+            return '<div class="listing-row"><strong>' + esc(l.name) + '</strong> <span class="mono">(' + esc(l.item_id) + ')</span>'
+              + (l.unit_amount != null ? ' — ' + (l.unit_amount / 100).toFixed(2) + ' ' + esc(l.currency) : '')
+              + '<div class="meta">' + esc(l.description) + '</div></div>';
+          }).join("") || '<div class="meta" style="margin-top:8px;">No listings yet.</div>';
+          return '<div class="item"><div class="title">' + esc(s.name) + ' <span class="pill">seller_id=' + s.seller_id + '</span></div>'
+            + '<div class="meta mono">' + esc(s.checkout_session_url) + '</div>' + listings + '</div>';
+        }).join("")
+      : '<p class="hint" style="margin:0;">No sellers registered yet.</p>';
+
+    els["listing-seller-select"].innerHTML = '<option value="">-- choose a seller --</option>'
+      + state.sellers.map(function (s) { return '<option value="' + s.seller_id + '">' + esc(s.name) + ' (id ' + s.seller_id + ')</option>'; }).join("");
+  }
+
+  function renderAgents() {
+    els["agents-list"].innerHTML = state.agents.length
+      ? state.agents.map(function (a) {
+          return '<div class="item"><div class="title">' + esc(a.name) + ' <span class="pill">agent_id=' + a.id + '</span></div>'
+            + '<div class="meta">intent: "' + esc(a.default_intent) + '"'
+            + (a.max_price != null ? ' · max ' + (a.max_price / 100).toFixed(2) : '')
+            + (a.category ? ' · ' + esc(a.category) : '') + '</div>'
+            + '<button class="line" data-test-agent="' + a.id + '" style="margin-top:8px;">Test search</button>'
+            + '<button class="line" data-delete-agent="' + a.id + '" style="margin-top:8px;">Delete</button>'
+            + '<div class="status" id="agent-test-' + a.id + '"></div></div>';
+        }).join("")
+      : '<p class="hint" style="margin:0;">No buyer-agent profiles yet.</p>';
+
+    els["snippet-agent-select"].innerHTML = '<option value="">-- ad hoc intent (no saved profile) --</option>'
+      + state.agents.map(function (a) { return '<option value="' + a.id + '">' + esc(a.name) + ' (id ' + a.id + ')</option>'; }).join("");
+
+    Array.prototype.forEach.call(document.querySelectorAll("[data-test-agent]"), function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-test-agent");
+        var out = document.getElementById("agent-test-" + id);
+        out.textContent = "Searching...";
+        api("/v1/commerce/search", "POST", { buyer_agent_id: Number(id), k: 3 }).then(function (r) {
+          if (!r.ok) { out.textContent = "Error: " + (r.data.detail || r.status); return; }
+          var m = r.data.matches;
+          out.textContent = m.length
+            ? m.length + " match(es) — top: " + m[0].name + " (score " + m[0].score.toFixed(3) + ")"
+            : "0 matches (no listings match this intent yet).";
+        });
+      });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll("[data-delete-agent]"), function (btn) {
+      btn.addEventListener("click", function () {
+        api("/v1/commerce/buyer-agents/" + btn.getAttribute("data-delete-agent"), "DELETE").then(function (r) {
+          if (r.ok) refreshAll();
+        });
+      });
+    });
+  }
+
+  els["save-key"].addEventListener("click", function () {
+    var key = els["api-key"].value.trim();
+    if (!key) return;
+    state.apiKey = key;
+    localStorage.setItem("observe_dashboard_key", key);
+    els["key-status"].innerHTML = '<span class="key-saved">Key saved to this browser.</span>';
+    setLocked(false);
+    refreshAll();
+  });
+
+  els["register-seller"].addEventListener("click", function () {
+    var name = els["seller-name"].value.trim();
+    var url = els["seller-url"].value.trim();
+    if (!name || !url) { els["seller-status"].textContent = "Name and checkout URL are both required."; return; }
+    api("/v1/commerce/sellers", "POST", { name: name, checkout_session_url: url }).then(function (r) {
+      els["seller-status"].textContent = r.ok ? "Registered seller_id=" + r.data.seller_id : "Error: " + (r.data.detail || r.status);
+      if (r.ok) { els["seller-name"].value = ""; els["seller-url"].value = ""; refreshAll(); }
+    });
+  });
+
+  els["add-listings"].addEventListener("click", function () {
+    var sellerId = els["listing-seller-select"].value;
+    if (!sellerId) { els["listings-status"].textContent = "Choose a seller first."; return; }
+    var listings;
+    try { listings = JSON.parse(els["listings-json"].value); }
+    catch (e) { els["listings-status"].textContent = "Invalid JSON: " + e.message; return; }
+    api("/v1/commerce/sellers/" + sellerId + "/listings", "POST", { listings: listings }).then(function (r) {
+      els["listings-status"].textContent = r.ok ? "Added " + r.data.added + " listing(s)." : "Error: " + (r.data.detail || r.status);
+      if (r.ok) refreshAll();
+    });
+  });
+
+  els["create-agent"].addEventListener("click", function () {
+    var name = els["agent-name"].value.trim();
+    var intent = els["agent-intent"].value.trim();
+    if (!name || !intent) { els["agent-status"].textContent = "Name and default intent are both required."; return; }
+    var maxPrice = els["agent-max-price"].value ? Number(els["agent-max-price"].value) : null;
+    var category = els["agent-category"].value.trim() || null;
+    api("/v1/commerce/buyer-agents", "POST", { name: name, default_intent: intent, max_price: maxPrice, category: category }).then(function (r) {
+      els["agent-status"].textContent = r.ok ? "Created agent_id=" + r.data.id : "Error: " + (r.data.detail || r.status);
+      if (r.ok) { els["agent-name"].value = ""; els["agent-intent"].value = ""; els["agent-max-price"].value = ""; els["agent-category"].value = ""; refreshAll(); }
+    });
+  });
+
+  els["run-import"].addEventListener("click", function () {
+    var payload;
+    try { payload = JSON.parse(els["import-json"].value); }
+    catch (e) { els["import-status"].textContent = "Invalid JSON: " + e.message; return; }
+    api("/v1/commerce/import", "POST", payload).then(function (r) {
+      els["import-status"].textContent = r.ok
+        ? "Imported " + r.data.sellers_created + " seller(s), " + r.data.listings_created + " listing(s), " + r.data.buyer_agents_created + " buyer agent(s)."
+        : "Error: " + (r.data.detail || r.status);
+      if (r.ok) refreshAll();
+    });
+  });
+
+  function buildSnippet() {
+    var agentId = els["snippet-agent-select"].value;
+    var framework = els["snippet-framework"].value;
+    var key = state.apiKey || "obs_...";
+    var bodyObj = agentId ? { buyer_agent_id: Number(agentId), k: 5 } : { intent: "describe what you're looking for", k: 5 };
+    var bodyJson = JSON.stringify(bodyObj);
+    var snippet = "";
+    if (framework === "curl") {
+      snippet = 'curl -X POST ' + API + '/v1/commerce/search \\\n'
+        + '  -H "Authorization: Bearer ' + key + '" \\\n'
+        + "  -d '" + bodyJson + "'";
+    } else if (framework === "python") {
+      snippet = "import requests\n\n"
+        + 'resp = requests.post(\n    "' + API + '/v1/commerce/search",\n'
+        + '    headers={"Authorization": "Bearer ' + key + '"},\n'
+        + "    json=" + bodyJson + ",\n)\n"
+        + "matches = resp.json()[\"matches\"]";
+    } else if (framework === "langchain") {
+      snippet = "from langchain.tools import tool\nimport requests\n\n"
+        + "@tool\n"
+        + "def observe_commerce_search(intent: str = None) -> dict:\n"
+        + '    """Search OBSERVE\'s agent commerce marketplace for real sellers matching intent."""\n'
+        + "    body = " + bodyJson + "\n"
+        + "    if intent:\n        body[\"intent\"] = intent\n"
+        + '    resp = requests.post(\n        "' + API + '/v1/commerce/search",\n'
+        + '        headers={"Authorization": "Bearer ' + key + '"}, json=body,\n    )\n'
+        + "    return resp.json()";
+    } else if (framework === "crewai") {
+      snippet = "from crewai.tools import BaseTool\nimport requests\n\n"
+        + "class ObserveCommerceSearchTool(BaseTool):\n"
+        + '    name: str = "observe_commerce_search"\n'
+        + '    description: str = "Search OBSERVE\'s agent commerce marketplace for real sellers."\n\n'
+        + "    def _run(self, intent: str = None) -> dict:\n"
+        + "        body = " + bodyJson + "\n"
+        + "        if intent:\n            body[\"intent\"] = intent\n"
+        + '        resp = requests.post(\n            "' + API + '/v1/commerce/search",\n'
+        + '            headers={"Authorization": "Bearer ' + key + '"}, json=body,\n        )\n'
+        + "        return resp.json()";
+    }
+    els["snippet-output"].textContent = snippet;
+  }
+
+  els["snippet-agent-select"].addEventListener("change", buildSnippet);
+  els["snippet-framework"].addEventListener("change", buildSnippet);
+  els["copy-snippet"].addEventListener("click", function () {
+    navigator.clipboard.writeText(els["snippet-output"].textContent).then(function () {
+      els["copy-snippet"].textContent = "Copied";
+      setTimeout(function () { els["copy-snippet"].textContent = "Copy"; }, 1500);
+    });
+  });
+
+  if (state.apiKey) {
+    els["api-key"].value = state.apiKey;
+    els["key-status"].innerHTML = '<span class="key-saved">Using saved key from this browser.</span>';
+    setLocked(false);
+    refreshAll();
+  } else {
+    setLocked(true);
+  }
+  buildSnippet();
+})();
+</script>

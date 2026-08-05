@@ -59,6 +59,7 @@ CREDITS_PER_COMMERCE_SEARCH = int(os.environ.get("OBSERVE_CREDITS_PER_COMMERCE_S
 SIGNUP_BONUS_CREDITS = int(os.environ.get("OBSERVE_SIGNUP_BONUS_CREDITS", "100"))
 
 _LANDING_PAGE_PATH = os.path.join(os.path.dirname(__file__), "landing", "index.html")
+_DASHBOARD_PAGE_PATH = os.path.join(os.path.dirname(__file__), "landing", "dashboard.html")
 _LEGAL_DIR = os.path.join(os.path.dirname(__file__), "legal")
 
 engine = SearchEngine()
@@ -130,6 +131,16 @@ def landing_page():
     # page is a handful of KB, and this lets it be edited/redeployed without
     # a server restart, same reasoning as _RepoRegistry.get() below.
     with open(_LANDING_PAGE_PATH) as f:
+        return f.read()
+
+
+@app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
+def dashboard_page():
+    # Same "read from disk every request" reasoning as landing_page() above.
+    # This page is pure client-side JS calling the real, already-CORS-
+    # enabled /v1/commerce/* endpoints with a pasted API key -- it holds no
+    # server-side session of its own.
+    with open(_DASHBOARD_PAGE_PATH) as f:
         return f.read()
 
 

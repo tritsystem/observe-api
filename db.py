@@ -154,6 +154,25 @@ def init_db():
                 created_at REAL NOT NULL
             )
         """)
+        # A saved, reusable buyer-agent CONFIGURATION -- not a running
+        # process. commerce_search can reference one by id and fall back
+        # to its default_intent/max_price/category for any field the
+        # caller doesn't explicitly override, so a real external agent
+        # (any framework) can be pointed at "buyer_agent_id=N" once
+        # instead of repeating the same intent/filters on every call.
+        # No execution loop lives here or anywhere else in this service --
+        # something still has to actually call /v1/commerce/search.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS commerce_buyer_agents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_hash TEXT NOT NULL,
+                name TEXT NOT NULL,
+                default_intent TEXT NOT NULL,
+                max_price INTEGER,
+                category TEXT,
+                created_at REAL NOT NULL
+            )
+        """)
 
 
 def create_api_key(email: str, initial_credits: int = 0) -> str:

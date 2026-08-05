@@ -727,3 +727,166 @@ def test_checkout_sessions_creates_a_real_working_account(client, fresh_db):
         headers={"Authorization": f"Bearer {body['api_key']}"},
     )
     assert search_resp.status_code == 200
+
+
+def test_my_sellers_lists_own_sellers_with_nested_listings(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db, email="dash1@example.com")
+    _make_seller_and_listing(client, api_key, item_id="sku-a")
+    other_key = _signup_and_fund(client, fresh_db, email="dash2@example.com")
+    _make_seller_and_listing(client, other_key, item_id="sku-b")
+
+    resp = client.get("/v1/commerce/my-sellers", headers={"Authorization": f"Bearer {api_key}"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1  # not the other key's seller
+    assert body[0]["name"] == "General Store"
+    assert len(body[0]["listings"]) == 1
+    assert body[0]["listings"][0]["item_id"] == "sku-a"
+
+
+def test_my_sellers_requires_auth(client, fresh_db):
+    resp = client.get("/v1/commerce/my-sellers")
+    assert resp.status_code == 401
+
+
+def test_create_and_list_buyer_agent(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db, email="buyeragent1@example.com")
+    resp = client.post(
+        "/v1/commerce/buyer-agents",
+        json={"name": "Trail Shopper", "default_intent": "waterproof hiking boots", "max_price": 15000},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["name"] == "Trail Shopper"
+    agent_id = body["id"]
+
+    list_resp = client.get("/v1/commerce/buyer-agents", headers={"Authorization": f"Bearer {api_key}"})
+    assert list_resp.status_code == 200
+    ids = [a["id"] for a in list_resp.json()]
+    assert agent_id in ids
+
+
+def test_buyer_agent_rejects_empty_default_intent(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db, email="buyeragent2@example.com")
+    resp = client.post(
+        "/v1/commerce/buyer-agents",
+        json={"name": "Empty", "default_intent": "   "},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 400
+
+
+def test_delete_buyer_agent_requires_ownership(client, fresh_db):
+    owner_key = _signup_and_fund(client, fresh_db, email="owner@example.com")
+    other_key = _signup_and_fund(client, fresh_db, email="notowner@example.com")
+    agent_id = client.post(
+        "/v1/commerce/buyer-agents",
+        json={"name": "Mine", "default_intent": "waterproof boots"},
+        headers={"Authorization": f"Bearer {owner_key}"},
+    ).json()["id"]
+
+    steal_resp = client.delete(f"/v1/commerce/buyer-agents/{agent_id}", headers={"Authorization": f"Bearer {other_key}"})
+    assert steal_resp.status_code == 404
+
+    real_resp = client.delete(f"/v1/commerce/buyer-agents/{agent_id}", headers={"Authorization": f"Bearer {owner_key}"})
+    assert real_resp.status_code == 200
+    assert real_resp.json()["deleted"] is True
+
+
+def test_search_via_buyer_agent_id_uses_saved_defaults(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db, email="buyeragent3@example.com")
+    _make_seller_and_listing(client, api_key, item_id="sku-boots")
+    agent_id = client.post(
+        "/v1/commerce/buyer-agents",
+        json={"name": "Trail Shopper", "default_intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    ).json()["id"]
+
+    resp = client.post(
+        "/v1/commerce/search", json={"buyer_agent_id": agent_id},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+    matches = resp.json()["matches"]
+    assert len(matches) >= 1
+    assert matches[0]["item_id"] == "sku-boots"
+
+
+def test_search_with_no_intent_and_no_buyer_agent_id_is_rejected(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db, email="buyeragent4@example.com")
+    resp = client.post("/v1/commerce/search", json={}, headers={"Authorization": f"Bearer {api_key}"})
+    assert resp.status_code == 400
+
+
+def test_search_rejects_a_buyer_agent_id_owned_by_someone_else(client, fresh_db):
+    owner_key = _signup_and_fund(client, fresh_db, email="owner2@example.com")
+    other_key = _signup_and_fund(client, fresh_db, email="notowner2@example.com")
+    agent_id = client.post(
+        "/v1/commerce/buyer-agents",
+        json={"name": "Mine", "default_intent": "waterproof boots"},
+        headers={"Authorization": f"Bearer {owner_key}"},
+    ).json()["id"]
+
+    resp = client.post(
+        "/v1/commerce/search", json={"buyer_agent_id": agent_id},
+        headers={"Authorization": f"Bearer {other_key}"},
+    )
+    assert resp.status_code == 404
+
+
+def test_import_creates_sellers_listings_and_buyer_agents_in_one_call(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db, email="importer1@example.com")
+    resp = client.post(
+        "/v1/commerce/import",
+        json={
+            "sellers": [{
+                "name": "Imported Outfitters",
+                "checkout_session_url": "https://imported.example.com/checkout_sessions",
+                "listings": [
+                    {"item_id": "imp-1", "name": "Rain Jacket", "description": "waterproof rain jacket", "unit_amount": 9000},
+                    {"item_id": "imp-2", "name": "Trail Poles", "description": "adjustable hiking poles", "unit_amount": 4000},
+                ],
+            }],
+            "buyer_agents": [
+                {"name": "Rain Shopper", "default_intent": "waterproof rain jacket", "max_price": 10000},
+            ],
+        },
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["sellers_created"] == 1
+    assert body["listings_created"] == 2
+    assert body["buyer_agents_created"] == 1
+
+    my_sellers = client.get("/v1/commerce/my-sellers", headers={"Authorization": f"Bearer {api_key}"}).json()
+    assert len(my_sellers) == 1
+    assert len(my_sellers[0]["listings"]) == 2
+
+    my_agents = client.get("/v1/commerce/buyer-agents", headers={"Authorization": f"Bearer {api_key}"}).json()
+    assert len(my_agents) == 1
+    assert my_agents[0]["name"] == "Rain Shopper"
+
+
+def test_import_rejects_a_bad_checkout_url_and_reports_partial_progress(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db, email="importer2@example.com")
+    resp = client.post(
+        "/v1/commerce/import",
+        json={"sellers": [
+            {"name": "Good Seller", "checkout_session_url": "https://good.example.com/checkout_sessions", "listings": []},
+            {"name": "Bad Seller", "checkout_session_url": "http://insecure.example.com/checkout_sessions", "listings": []},
+        ]},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 400
+    # the first, valid seller really was created before the second failed --
+    # disclosed partial-progress semantics, not silently rolled back
+    my_sellers = client.get("/v1/commerce/my-sellers", headers={"Authorization": f"Bearer {api_key}"}).json()
+    assert len(my_sellers) == 1
+    assert my_sellers[0]["name"] == "Good Seller"
+
+
+def test_import_requires_auth(client, fresh_db):
+    resp = client.post("/v1/commerce/import", json={"sellers": [], "buyer_agents": []})
+    assert resp.status_code == 401
