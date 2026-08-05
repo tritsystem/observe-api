@@ -1,21 +1,32 @@
 """
 Framework-agnostic HTTP client for the hosted OBSERVE Search API -- shared
-by the LangChain and CrewAI tool wrappers so neither reimplements the same
-request/error-handling logic.
+by the MCP server, the CLI, and the LangChain/CrewAI tool wrappers, so
+none of them reimplement the same request/error-handling logic (or drift
+out of sync with each other).
 """
 import os
 from typing import Optional
 
 import httpx
 
+from .cost_guard import COST_GUARD_MESSAGE, looks_like_exact_identifier
+
 API_BASE = os.environ.get("OBSERVE_API_BASE", "https://api.observe-search.online")
 
 
-def search(query: str, k: int = 10, repo: Optional[str] = None, api_key: Optional[str] = None) -> str:
+def search(query: str, k: int = 10, repo: Optional[str] = None, api_key: Optional[str] = None, force: bool = False) -> str:
     """Calls POST /v1/search and returns a human/LLM-readable string --
-    formatted output (not raw JSON) since both LangChain and CrewAI tools
-    are meant to return text an agent reads directly, not a structure it
-    has to parse itself."""
+    formatted output (not raw JSON) since every caller (MCP, CLI,
+    LangChain, CrewAI) is meant to return text an agent reads directly,
+    not a structure it has to parse itself.
+
+    The cost guard lives HERE, not duplicated in each caller -- an
+    exact-identifier-shaped query (the case grep already wins, measured
+    5/5 vs. 3/5) is refused before it ever reaches the network, for
+    every integration path at once. Pass force=True to bypass."""
+    if not force and looks_like_exact_identifier(query):
+        return COST_GUARD_MESSAGE
+
     key = api_key or os.environ.get("OBSERVE_API_KEY")
     if not key:
         return "Error: no API key. Pass api_key= or set OBSERVE_API_KEY. Get one from POST /v1/signup at " + API_BASE

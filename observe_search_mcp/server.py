@@ -15,16 +15,34 @@ import os
 import sys
 
 import httpx
-from mcp.server.fastmcp import FastMCP
+
+# Real bug found by actually installing and importing this, not assumed:
+# mcp.server.fastmcp.FastMCP existed in the SDK's 1.x line (what pyproject
+# .toml's loose `mcp>=1.0` pin allows) but was renamed/moved to
+# mcp.server.mcpserver.MCPServer in the SDK's 2.0.0 release -- a fresh
+# `pip install observe-search-mcp` today pulls 2.0.0 and the old import
+# raises ModuleNotFoundError immediately, silently breaking every MCP
+# client that tried to use this. Same decorator/run() API in both
+# generations (verified directly against the installed 2.0.0 package's
+# real constructor signature), so a try/except covers both without a
+# behavior change for whichever one a caller actually has installed.
+try:
+    from mcp.server.fastmcp import FastMCP as _MCPServerClass
+except ImportError:
+    from mcp.server.mcpserver import MCPServer as _MCPServerClass
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from observe_search_tools import commerce as _commerce  # noqa: E402
+from observe_search_tools import core as _core  # noqa: E402
 
 API_BASE = os.environ.get("OBSERVE_API_BASE", "https://api.observe-search.online")
 API_KEY = os.environ.get("OBSERVE_API_KEY")
 
-mcp = FastMCP("observe-hosted-search")
+mcp = _MCPServerClass("observe-hosted-search")
 
 
 @mcp.tool()
-def search_code_hosted(query: str, k: int = 10, repo: str | None = None) -> str:
+def search_code_hosted(query: str, k: int = 10, repo: str | None = None, force: bool = False) -> str:
     """Semantic code search over a curated set of popular open source repos
     (React, Django, NumPy, FastAPI, Tokio, and more -- call list_repos_hosted
     for the current list). Costs API credits per call (see check_balance).
@@ -34,41 +52,21 @@ def search_code_hosted(query: str, k: int = 10, repo: str | None = None) -> str:
     upload." If you already know the exact function/class/file name, grep
     or a direct file read will be faster and free; this tool is for
     vocabulary-mismatch and concept-only queries, not exact-name lookups.
+    A real, automated check (not just this description) refuses an
+    exact-identifier-shaped query by default -- pass force=True if it's
+    genuinely a concept-only query despite looking like one token.
 
     Args:
         query: natural-language description of what you're looking for.
         k: number of results to return (1-50, default 10).
         repo: optional -- scope the search to one indexed repo (see
             list_repos_hosted). Omit to search across all indexed repos.
+        force: bypass the exact-identifier cost guard (default False).
     """
-    if not API_KEY:
-        return "Error: OBSERVE_API_KEY is not set. Get one from POST /v1/signup at " + API_BASE
-    try:
-        resp = httpx.post(
-            f"{API_BASE}/v1/search",
-            headers={"Authorization": f"Bearer {API_KEY}"},
-            json={"query": query, "k": k, "repo": repo},
-            timeout=30,
-        )
-    except httpx.RequestError as e:
-        return f"Error: could not reach {API_BASE}: {e}"
-
-    if resp.status_code == 402:
-        return "Error: insufficient credits. Buy more at the checkout_url from your original /v1/signup response."
-    if resp.status_code == 401:
-        return "Error: invalid API key. Check OBSERVE_API_KEY."
-    if resp.status_code != 200:
-        return f"Error: API returned {resp.status_code}: {resp.text}"
-
-    data = resp.json()
-    if not data["results"]:
-        return f"No results found. ({data['credits_remaining']} credits remaining.)"
-
-    lines = [f"{len(data['results'])} result(s), {data['credits_remaining']} credits remaining:\n"]
-    for r in data["results"]:
-        repo_tag = f"[{r['repo']}] " if r.get("repo") else ""
-        lines.append(f"{repo_tag}{r['path']} (score {r['score']:.3f})\n  {r['preview']}\n")
-    return "\n".join(lines)
+    # core.search() checks the cost guard BEFORE the API-key check -- no
+    # redundant pre-check here, so that ordering stays correct instead of
+    # this function silently short-circuiting it.
+    return _core.search(query, k=k, repo=repo, api_key=API_KEY, force=force)
 
 
 @mcp.tool()
@@ -99,6 +97,46 @@ def check_balance() -> str:
     if resp.status_code != 200:
         return f"Error: API returned {resp.status_code}: {resp.text}"
     return f"{resp.json()['credits']} credits remaining."
+
+
+@mcp.tool()
+def register_seller_hosted(name: str, checkout_session_url: str) -> str:
+    """Registers a seller for the ACP-compatible commerce discovery API --
+    free (no credits charged). checkout_session_url must be the seller's
+    own real ACP endpoint (https). Returns the new seller_id, needed for
+    add_listings_hosted."""
+    return _commerce.register_seller(name, checkout_session_url, api_key=API_KEY)
+
+
+@mcp.tool()
+def add_listings_hosted(seller_id: int, listings: list) -> str:
+    """Adds product listings to a seller registered via
+    register_seller_hosted -- free (no credits charged). Each listing:
+    {"item_id": str, "name": str, "description": str, "unit_amount": int
+    (minor currency units, optional), "currency": str (default "usd"),
+    "category": str (optional)}."""
+    return _commerce.add_listings(seller_id, listings, api_key=API_KEY)
+
+
+@mcp.tool()
+def commerce_search_hosted(intent: str, max_price: int | None = None, category: str | None = None, k: int = 10) -> str:
+    """ACP-compatible buyer/seller discovery: describe what you want to buy
+    in plain language, get back matched real sellers' checkout_session_url
+    + item_id to complete a purchase directly against. Never handles
+    payment or credentials, and never sees whether a purchase completes --
+    call report_purchase_feedback_hosted afterward so future searches
+    learn from real outcomes. Costs API credits per call."""
+    return _commerce.commerce_search(intent, max_price=max_price, category=category, k=k, api_key=API_KEY)
+
+
+@mcp.tool()
+def report_purchase_feedback_hosted(seller_id: int, item_id: str, outcome: str) -> str:
+    """Reports a real outcome after calling a match's checkout_session_url
+    directly (this API never sees that transaction). outcome: "purchased",
+    "not_purchased", or "irrelevant". A confirmed purchase teaches the
+    ranking for future searches with this key; self-reported, not
+    independently verified."""
+    return _commerce.report_purchase_feedback(seller_id, item_id, outcome, api_key=API_KEY)
 
 
 def main():

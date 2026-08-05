@@ -1,7 +1,7 @@
 [project]
 name = "observe-search-tools"
 version = "0.1.0"
-description = "Client tools for the hosted OBSERVE Search API -- pay-per-query semantic code search over curated open source repos, for AI agents. MCP server + LangChain + CrewAI tool wrappers."
+description = "Client tools for the hosted OBSERVE Search API -- pay-per-query semantic code search and ACP-compatible agentic commerce discovery. CLI + MCP server + LangChain + CrewAI wrappers, sharing one client core so behavior is identical across all of them."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -21,6 +21,7 @@ testpaths = ["tests"]
 
 [project.scripts]
 observe-search-mcp = "observe_search_mcp.server:main"
+observe = "observe_search_tools.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]

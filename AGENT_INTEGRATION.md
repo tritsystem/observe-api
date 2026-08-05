@@ -1,7 +1,12 @@
 # Wiring OBSERVE into an agent's toolset
 
-Three ways to give an agent the motive to call OBSERVE, in order of how
-much of that motive you get for free.
+Four ways to give an agent the motive to call OBSERVE, in order of how
+much of that motive you get for free. As of 2026-08-05, the motive isn't
+just a tool description an agent might ignore -- `core.search()` (the one
+shared client every path below calls into) refuses an exact-identifier
+or file-path-shaped query BEFORE it ever reaches the network, for every
+integration path at once, not duplicated per-wrapper. `force=True` (or
+`--force` on the CLI) overrides it.
 
 ## 1. MCP (Claude Code, Claude Desktop, Cursor) -- motive comes for free
 
@@ -51,7 +56,30 @@ agent = Agent(..., tools=[ObserveSearchTool()])
 description to write, no prompt engineering, the tool carries its own
 motive with it.
 
-## 3. Raw HTTP / a custom agent framework -- you write the motive
+## 3. CLI (shell-based agents, CI scripts, anything that can exec a command)
+
+For an agent harness that shells out rather than speaking MCP or a
+Python framework directly -- the `observe` command, installed by the
+same `observe-search-tools` package:
+
+```bash
+pip install observe-search-tools
+export OBSERVE_API_KEY=obs_...
+observe search "where does this handle retrying a failed upload"
+observe search "retryUpload"              # refused by the cost guard, no credit spent
+observe search "retryUpload" --force      # explicit override
+observe commerce-search "waterproof boots for a muddy trail"
+```
+
+Same `core.py`/`commerce.py` client as every other path above, so
+behavior (including the cost guard) is identical -- this isn't a fourth
+reimplementation with its own bugs, it's the same one wrapped in
+`argparse` instead of a framework decorator. `observe --help` lists
+every subcommand, including the commerce ones
+(`commerce-register-seller`, `commerce-add-listings`,
+`commerce-feedback`).
+
+## 4. Raw HTTP / a custom agent framework -- you write the motive
 
 If you're not using MCP or one of the two wrapped frameworks, there's no
 tool description doing this for you -- your agent's system prompt has to
@@ -89,10 +117,10 @@ it) into the agent's instructions, and the motive exists the same way it
 does in the MCP/LangChain/CrewAI paths -- just written explicitly instead
 of inherited from a tool description.
 
-## The one principle underneath all three paths
+## The one principle underneath all four paths
 
 The motive isn't "search more" -- it's "search when a name-based lookup
-would fail." Every wiring above says the same thing: grep/file-read first
+would fail." Every wiring above (MCP, LangChain/CrewAI, CLI, raw HTTP) says the same thing: grep/file-read first
 if you know the identifier, this API when you only know the behavior.
 Skipping that distinction in your own system prompt is the single most
 likely way to turn this into an expensive, slower grep replacement instead

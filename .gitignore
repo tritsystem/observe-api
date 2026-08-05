@@ -16,3 +16,6 @@ private/
 !*.env.example
 *.log
 *.faiss
+*.egg-info/
+build/
+dist/
