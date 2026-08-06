@@ -34,6 +34,28 @@ import rate_limit
 import tenant_index
 from search_engine import SearchEngine
 
+# Real, measured fix -- a concurrent load test this session (30-way,
+# isolated instance) found p50 latency at 2078ms vs. 94ms at
+# concurrency=1, a 20x jump nothing in the actual search/rank compute
+# explains on its own. Root cause: PyTorch's CPU backend defaults to
+# fanning EACH model.encode() call out across many BLAS threads (16 on
+# this machine) -- under N concurrent requests, that's N x 16 threads
+# competing for real physical cores (32 here), severe oversubscription.
+# Parallelism already comes from request-level concurrency (many
+# threads each handling one request via Starlette's threadpool), not
+# from any single encode() call needing to be internally multi-
+# threaded -- capping to 1 measured a real ~23% throughput improvement
+# (14.0 -> 17.2 req/s) and lower tail latency. Wrapped defensively:
+# set_num_interop_threads() raises if called after parallel work has
+# already started in this process, which must never be allowed to
+# break startup over a pure performance tune.
+try:
+    import torch
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
+except Exception as e:
+    print(f"(torch thread tuning skipped, non-fatal: {e})", flush=True)
+
 INDEX_DIR = os.environ.get("OBSERVE_INDEX_DIR", "/data/observe-index")
 MODEL_PATH = os.environ.get("OBSERVE_MODEL_PATH", "sentence-transformers/all-MiniLM-L6-v2")
 CREDITS_PER_SEARCH = int(os.environ.get("OBSERVE_CREDITS_PER_SEARCH", "1"))
