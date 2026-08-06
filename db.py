@@ -173,6 +173,22 @@ def init_db():
                 created_at REAL NOT NULL
             )
         """)
+        # Ed25519/JWS-signed receipts (see commerce_receipts.py) for real
+        # commerce events -- a match happening, a buyer/seller reporting an
+        # outcome. Independently verifiable by any third party against
+        # /.well-known/observe-commerce-signing-key, without needing to
+        # trust this API's live database. Deliberately does NOT attest that
+        # money moved (OBSERVE never touches payment) -- only that OBSERVE
+        # recorded this exact claim, from this exact event, at this time.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS commerce_receipts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                match_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                jws TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )
+        """)
 
 
 def create_api_key(email: str, initial_credits: int = 0) -> str:

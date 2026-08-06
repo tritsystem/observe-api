@@ -52,6 +52,7 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 import billing
+import commerce_receipts
 import commerce_search_index
 import commerce_spiking_memory
 import obsidian_memory
@@ -333,6 +334,12 @@ class DeleteResponse(BaseModel):
     deleted: bool
 
 
+class ReceiptOut(BaseModel):
+    event_type: str  # "commerce.match" | "commerce.buyer_feedback" | "commerce.seller_feedback"
+    jws: str  # compact JWS -- verify against GET /.well-known/observe-commerce-signing-key
+    created_at: float
+
+
 class SellerImport(BaseModel):
     name: str
     checkout_session_url: str
@@ -351,6 +358,31 @@ class ImportResponse(BaseModel):
 
 
 def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_fn, credits_per_search: int = CREDITS_PER_COMMERCE_SEARCH_DEFAULT):
+    # One signer per process -- see commerce_receipts.py for why the seed
+    # must come from OBSERVE_RECEIPT_SIGNING_KEY_SEED in production (an
+    # ephemeral fallback key here would silently orphan every previously-
+    # issued receipt's public-key verifiability on the next restart).
+    _receipt_signer = commerce_receipts.ReceiptSigner()
+
+    def _issue_receipt(match_id: str, event_type: str, payload: dict) -> str:
+        """Signs and persists a receipt for a real commerce event. Never
+        allowed to break the response it's attached to -- a signing/DB
+        failure here is logged and swallowed, same reasoning as the
+        Obsidian vault write in commerce_feedback below: the receipt is a
+        best-effort auditability layer on top of a real event, not a
+        precondition for that event's own correctness."""
+        try:
+            jws = _receipt_signer.sign(payload)
+            with db.get_conn() as conn:
+                conn.execute(
+                    "INSERT INTO commerce_receipts (match_id, event_type, jws, created_at) VALUES (?, ?, ?, ?)",
+                    (match_id, event_type, jws, time.time()),
+                )
+            return jws
+        except Exception as e:
+            print(f"(receipt signing/persist failed for {event_type} on {match_id}, non-fatal: {e})", flush=True)
+            return ""
+
     # Per-buyer-key learned listing-affinity memory (real Spikeling STDP,
     # see commerce_spiking_memory.py) -- one ListingAffinityMemory per
     # key_hash, in-process cache for the life of this process, backed by
@@ -756,6 +788,12 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
                     for mid, (final_score, cosine, boost, row, composite_id) in zip(match_ids, top)
                 ],
             )
+        for mid, (final_score, cosine, boost, row, composite_id) in zip(match_ids, top):
+            _issue_receipt(mid, "commerce.match", {
+                "type": "commerce.match", "match_id": mid, "buyer_key_hash": key_hash,
+                "seller_id": row["seller_id"], "item_id": row["item_id"],
+                "score": float(final_score), "created_at": now,
+            })
 
         matches = [
             CommerceMatch(
@@ -871,11 +909,21 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
         if seller is None:
             raise HTTPException(status_code=404, detail="no seller with that id")
 
+        feedback_time = time.time()
         with db.get_conn() as conn:
             conn.execute(
                 "INSERT INTO commerce_feedback (key_hash, seller_id, item_id, outcome, created_at) VALUES (?, ?, ?, ?, ?)",
-                (key_hash, req.seller_id, req.item_id, req.outcome, time.time()),
+                (key_hash, req.seller_id, req.item_id, req.outcome, feedback_time),
             )
+        if req.match_id:
+            # Only issued when a real match_id ties this claim to a
+            # specific, real prior search -- the legacy seller_id/item_id-
+            # only path has nothing to correlate a receipt against.
+            _issue_receipt(req.match_id, "commerce.buyer_feedback", {
+                "type": "commerce.buyer_feedback", "match_id": req.match_id, "buyer_key_hash": key_hash,
+                "seller_id": req.seller_id, "item_id": req.item_id,
+                "outcome": req.outcome, "created_at": feedback_time,
+            })
 
         reinforced = False
         if req.outcome == "purchased":
@@ -1016,11 +1064,16 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
         if seller is None:
             raise HTTPException(status_code=403, detail="this match's seller is not owned by your API key")
 
+        seller_feedback_time = time.time()
         with db.get_conn() as conn:
             conn.execute(
                 "INSERT INTO commerce_seller_feedback (match_id, seller_key_hash, outcome, rating, created_at) VALUES (?, ?, ?, ?, ?)",
-                (req.match_id, seller_key_hash, req.outcome, req.rating, time.time()),
+                (req.match_id, seller_key_hash, req.outcome, req.rating, seller_feedback_time),
             )
+        _issue_receipt(req.match_id, "commerce.seller_feedback", {
+            "type": "commerce.seller_feedback", "match_id": req.match_id, "seller_key_hash": seller_key_hash,
+            "outcome": req.outcome, "rating": req.rating, "created_at": seller_feedback_time,
+        })
         return SellerFeedbackResponse(recorded=True, note="Recorded. Contributes to the buyer key's reputation tier.")
 
     @app.get("/v1/commerce/my-reputation", response_model=ReputationSummary)
@@ -1138,6 +1191,33 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
                 "once. Complete checkout_url to add the paid package."
             ),
         )
+
+    @app.get("/v1/commerce/receipts/{match_id}", response_model=List[ReceiptOut])
+    def commerce_receipts_for_match(match_id: str):
+        """Public, no API key needed -- deliberately, since the whole
+        point of a signed receipt is that a third party can verify it
+        WITHOUT trusting this API or holding an OBSERVE key. match_id
+        itself is an unguessable UUID (the real capability), same
+        assumption /v1/commerce/verify-match's match_id already relies
+        on. Verify any returned jws against
+        GET /.well-known/observe-commerce-signing-key -- a mismatch means
+        either the receipt was tampered with, or it wasn't issued by this
+        key at all."""
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT event_type, jws, created_at FROM commerce_receipts WHERE match_id = ? ORDER BY created_at ASC",
+                (match_id,),
+            ).fetchall()
+        return [ReceiptOut(event_type=r["event_type"], jws=r["jws"], created_at=r["created_at"]) for r in rows]
+
+    @app.get("/.well-known/observe-commerce-signing-key")
+    def observe_commerce_signing_key():
+        """The public half of the Ed25519 key this process signs commerce
+        receipts with -- RFC 8037 JWK format, verifiable with any standard
+        JOSE library. See commerce_receipts.py for the real, disclosed
+        limitation: this key is only stable across restarts if
+        OBSERVE_RECEIPT_SIGNING_KEY_SEED is set in the environment."""
+        return _receipt_signer.public_jwk()
 
     # Returned so ucp_adapter.py can reuse the exact same search/rank/learn
     # logic for its UCP-shaped catalog endpoint, instead of a second

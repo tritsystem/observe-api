@@ -11,3 +11,5 @@ faiss-cpu==1.15.0
 torch==2.13.0
 numpy==2.3.5
 rank-bm25==0.2.2
+PyJWT==2.10.1
+cryptography==46.0.5

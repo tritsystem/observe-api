@@ -932,3 +932,113 @@ def test_import_rejects_a_bad_checkout_url_and_reports_partial_progress(client, 
 def test_import_requires_auth(client, fresh_db):
     resp = client.post("/v1/commerce/import", json={"sellers": [], "buyer_agents": []})
     assert resp.status_code == 401
+
+
+def _jwk_to_public_key(jwk):
+    import base64
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    raw = base64.urlsafe_b64decode(jwk["x"] + "==")
+    return Ed25519PublicKey.from_public_bytes(raw)
+
+
+def _verify_receipt(client, jws):
+    """Mimics what a real third party would do: fetch the public key from
+    the well-known endpoint (not from any internal test fixture) and
+    verify independently -- proves the receipt is checkable without
+    trusting this API's live database, the actual point of signing it."""
+    import jwt as pyjwt
+    jwk = client.get("/.well-known/observe-commerce-signing-key").json()
+    public_key = _jwk_to_public_key(jwk)
+    return pyjwt.decode(jws, public_key, algorithms=["EdDSA"])
+
+
+def test_well_known_signing_key_is_a_valid_jwk(client, fresh_db):
+    resp = client.get("/.well-known/observe-commerce-signing-key")
+    assert resp.status_code == 200
+    jwk = resp.json()
+    assert jwk["kty"] == "OKP"
+    assert jwk["crv"] == "Ed25519"
+    assert jwk["alg"] == "EdDSA"
+    assert len(jwk["x"]) > 0
+    # No Authorization header was sent -- public by design
+
+
+def test_search_issues_a_verifiable_receipt_for_each_match(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db, email="receipt-buyer@example.com")
+    _make_seller_and_listing(client, api_key, item_id="sku-receipt")
+    matches = client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    ).json()["matches"]
+    match_id = matches[0]["match_id"]
+
+    receipts = client.get(f"/v1/commerce/receipts/{match_id}").json()  # no auth header -- public
+    assert len(receipts) == 1
+    assert receipts[0]["event_type"] == "commerce.match"
+
+    payload = _verify_receipt(client, receipts[0]["jws"])
+    assert payload["type"] == "commerce.match"
+    assert payload["match_id"] == match_id
+    assert payload["item_id"] == "sku-receipt"
+
+
+def test_buyer_and_seller_feedback_each_issue_a_verifiable_receipt(client, fresh_db):
+    buyer_key = _signup_and_fund(client, fresh_db, email="receipt-buyer2@example.com")
+    seller_key = _signup_and_fund(client, fresh_db, email="receipt-seller2@example.com")
+    seller_id = _register_seller_with_boots(client, seller_key, "Receipt Test Store")
+
+    match_id = client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {buyer_key}"},
+    ).json()["matches"][0]["match_id"]
+
+    client.post(
+        "/v1/commerce/feedback",
+        json={"seller_id": seller_id, "item_id": "sku-1", "outcome": "purchased", "match_id": match_id},
+        headers={"Authorization": f"Bearer {buyer_key}"},
+    )
+    client.post(
+        "/v1/commerce/seller-feedback",
+        json={"match_id": match_id, "outcome": "fulfilled", "rating": 5},
+        headers={"Authorization": f"Bearer {seller_key}"},
+    )
+
+    receipts = client.get(f"/v1/commerce/receipts/{match_id}").json()
+    event_types = {r["event_type"] for r in receipts}
+    assert event_types == {"commerce.match", "commerce.buyer_feedback", "commerce.seller_feedback"}
+
+    for r in receipts:
+        payload = _verify_receipt(client, r["jws"])
+        assert payload["match_id"] == match_id
+        assert payload["type"] == r["event_type"]
+
+
+def test_tampered_receipt_fails_verification(client, fresh_db):
+    import jwt as pyjwt
+    api_key = _signup_and_fund(client, fresh_db, email="receipt-tamper@example.com")
+    _make_seller_and_listing(client, api_key, item_id="sku-tamper")
+    match_id = client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    ).json()["matches"][0]["match_id"]
+    jws = client.get(f"/v1/commerce/receipts/{match_id}").json()[0]["jws"]
+
+    # Flip one character in the signature segment -- must fail verification,
+    # not silently pass.
+    header, payload, sig = jws.split(".")
+    tampered_sig = ("A" if sig[0] != "A" else "B") + sig[1:]
+    tampered = f"{header}.{payload}.{tampered_sig}"
+
+    jwk = client.get("/.well-known/observe-commerce-signing-key").json()
+    public_key = _jwk_to_public_key(jwk)
+    try:
+        pyjwt.decode(tampered, public_key, algorithms=["EdDSA"])
+        assert False, "tampered receipt should not verify"
+    except pyjwt.InvalidSignatureError:
+        pass
+
+
+def test_receipts_for_unknown_match_id_returns_empty_list(client, fresh_db):
+    resp = client.get("/v1/commerce/receipts/not-a-real-match-id")
+    assert resp.status_code == 200
+    assert resp.json() == []
