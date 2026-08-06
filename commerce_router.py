@@ -500,6 +500,8 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
         to see this without remembering seller_id from the original
         register_seller response."""
         raw_key = require_key_fn(authorization)
+        if not rate_limit.allow(raw_key):
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
         key_hash = db.hash_key(raw_key)
         with db.get_conn() as conn:
             sellers = conn.execute(
@@ -549,6 +551,8 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
     @app.get("/v1/commerce/buyer-agents", response_model=List[BuyerAgentOut])
     def list_buyer_agents(authorization: Optional[str] = Header(None)):
         raw_key = require_key_fn(authorization)
+        if not rate_limit.allow(raw_key):
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
         key_hash = db.hash_key(raw_key)
         with db.get_conn() as conn:
             rows = conn.execute(
@@ -563,6 +567,8 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
     @app.delete("/v1/commerce/buyer-agents/{agent_id}", response_model=DeleteResponse)
     def delete_buyer_agent(agent_id: int, authorization: Optional[str] = Header(None)):
         raw_key = require_key_fn(authorization)
+        if not rate_limit.allow(raw_key):
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
         key_hash = db.hash_key(raw_key)
         with db.get_conn() as conn:
             cur = conn.execute(
@@ -835,6 +841,8 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
         not global, but this is a real, not-yet-hardened trust gap worth
         stating plainly rather than leaving implicit."""
         raw_key = require_key_fn(authorization)
+        if not rate_limit.allow(raw_key):
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
         if req.outcome not in _VALID_OUTCOMES:
             raise HTTPException(status_code=400, detail=f"outcome must be one of {sorted(_VALID_OUTCOMES)}")
 
@@ -988,6 +996,8 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
         _compute_tier) -- a real, deliberate asymmetry: trust should be
         harder to keep than to lose."""
         raw_key = require_key_fn(authorization)
+        if not rate_limit.allow(raw_key):
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
         if req.outcome not in _VALID_SELLER_OUTCOMES:
             raise HTTPException(status_code=400, detail=f"outcome must be one of {sorted(_VALID_SELLER_OUTCOMES)}")
         if req.rating is not None and not (1 <= req.rating <= 5):
@@ -1016,6 +1026,8 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
     @app.get("/v1/commerce/my-reputation", response_model=ReputationSummary)
     def commerce_my_reputation(authorization: Optional[str] = Header(None)):
         raw_key = require_key_fn(authorization)
+        if not rate_limit.allow(raw_key):
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
         return ReputationSummary(**_reputation_for_key(db.hash_key(raw_key)))
 
     @app.get("/v1/commerce/verify-match", response_model=VerifyMatchResponse)
@@ -1028,6 +1040,8 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
         seller learns "is this buyer trustworthy," not "who is this
         buyer, what else have they bought")."""
         raw_key = require_key_fn(authorization)
+        if not rate_limit.allow(raw_key):
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
         seller_key_hash = db.hash_key(raw_key)
         with db.get_conn() as conn:
             match = conn.execute("SELECT * FROM commerce_matches WHERE match_id = ?", (match_id,)).fetchone()
