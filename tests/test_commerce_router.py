@@ -1129,3 +1129,107 @@ def test_get_unknown_quote_404s(client, fresh_db):
 def test_quote_requires_auth(client, fresh_db):
     resp = client.post("/v1/commerce/quotes", json={"seller_id": 1, "item_id": "x"})
     assert resp.status_code == 401
+
+
+def _convert_bits(data, from_bits=8, to_bits=5, pad=True):
+    """8-bit bytes -> 5-bit bech32 groups (BIP-173) -- needed only to
+    build a real, valid segwit address fixture for these tests."""
+    acc, bits, ret = 0, 0, []
+    maxv = (1 << to_bits) - 1
+    for value in data:
+        acc = (acc << from_bits) | value
+        bits += from_bits
+        while bits >= to_bits:
+            bits -= to_bits
+            ret.append((acc >> bits) & maxv)
+    if pad and bits:
+        ret.append((acc << (to_bits - bits)) & maxv)
+    return ret
+
+
+def _valid_bech32_btc_address():
+    import crypto_payment_rails as cpr
+    witness_program = [0] + _convert_bits(list(range(20)))
+    return cpr.bech32_encode("bc", witness_program, cpr.BECH32_CONST)
+
+
+def test_register_seller_with_onchain_btc_payment_rail(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db, email="crypto-seller1@example.com")
+    address = _valid_bech32_btc_address()
+    resp = client.post(
+        "/v1/commerce/sellers",
+        json={"name": "BTC Store", "checkout_session_url": "https://btcstore.example.com/checkout_sessions",
+              "payment_rail": "onchain_btc", "payment_uri": address},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+
+
+def test_register_seller_rejects_invalid_btc_address(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db, email="crypto-seller2@example.com")
+    resp = client.post(
+        "/v1/commerce/sellers",
+        json={"name": "Bad BTC Store", "checkout_session_url": "https://btcstore.example.com/checkout_sessions",
+              "payment_rail": "onchain_btc", "payment_uri": "not-a-real-address"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 400
+
+
+def test_register_seller_with_lightning_address(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db, email="crypto-seller3@example.com")
+    resp = client.post(
+        "/v1/commerce/sellers",
+        json={"name": "Lightning Store", "checkout_session_url": "https://lnstore.example.com/checkout_sessions",
+              "payment_rail": "lightning", "payment_uri": "store@lnstore.example.com"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+
+
+def test_register_seller_rejects_unknown_payment_rail(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db, email="crypto-seller4@example.com")
+    resp = client.post(
+        "/v1/commerce/sellers",
+        json={"name": "Weird Store", "checkout_session_url": "https://weird.example.com/checkout_sessions",
+              "payment_rail": "dogecoin"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 400
+
+
+def test_search_surfaces_payment_rail_and_uri_in_match(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db, email="crypto-seller5@example.com")
+    address = _valid_bech32_btc_address()
+    seller_id = client.post(
+        "/v1/commerce/sellers",
+        json={"name": "BTC Boots", "checkout_session_url": "https://btcboots.example.com/checkout_sessions",
+              "payment_rail": "onchain_btc", "payment_uri": address},
+        headers={"Authorization": f"Bearer {api_key}"},
+    ).json()["seller_id"]
+    client.post(
+        f"/v1/commerce/sellers/{seller_id}/listings",
+        json={"listings": [{"item_id": "sku-btc", "name": "Boots", "description": "hiking boot waterproof", "unit_amount": 12000}]},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    matches = client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    ).json()["matches"]
+    match = next(m for m in matches if m["seller_id"] == seller_id)
+    assert match["payment_rail"] == "onchain_btc"
+    assert match["payment_uri"] == address
+
+
+def test_default_payment_rail_is_acp_for_existing_style_registration(client, fresh_db):
+    """Backward compatibility: a seller registered the old way (no
+    payment_rail field at all) still works exactly as before."""
+    api_key = _signup_and_fund(client, fresh_db, email="crypto-seller6@example.com")
+    resp = client.post(
+        "/v1/commerce/sellers",
+        json={"name": "Plain Old Store", "checkout_session_url": "https://plain.example.com/checkout_sessions"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+    my_sellers = client.get("/v1/commerce/my-sellers", headers={"Authorization": f"Bearer {api_key}"}).json()
+    assert my_sellers[0]["payment_rail"] == "acp"

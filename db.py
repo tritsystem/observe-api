@@ -75,6 +75,8 @@ def init_db():
                 key_hash TEXT NOT NULL,
                 name TEXT NOT NULL,
                 checkout_session_url TEXT NOT NULL,
+                payment_rail TEXT NOT NULL DEFAULT 'acp',
+                payment_uri TEXT,
                 created_at REAL NOT NULL
             )
         """)
@@ -212,6 +214,17 @@ def init_db():
                 created_at REAL NOT NULL
             )
         """)
+        # Real migration, not just a CREATE TABLE change -- commerce_sellers
+        # already has live production rows (CREATE TABLE IF NOT EXISTS does
+        # NOT retroactively add columns to an existing table). Idempotent:
+        # checks PRAGMA table_info first, so re-running init_db() on every
+        # startup (as it already does) never double-applies or errors on an
+        # already-migrated database.
+        existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(commerce_sellers)").fetchall()}
+        if "payment_rail" not in existing_cols:
+            conn.execute("ALTER TABLE commerce_sellers ADD COLUMN payment_rail TEXT NOT NULL DEFAULT 'acp'")
+        if "payment_uri" not in existing_cols:
+            conn.execute("ALTER TABLE commerce_sellers ADD COLUMN payment_uri TEXT")
 
 
 def create_api_key(email: str, initial_credits: int = 0) -> str:

@@ -55,7 +55,10 @@ import billing
 import commerce_receipts
 import commerce_search_index
 import commerce_spiking_memory
+import crypto_payment_rails
 import obsidian_memory
+
+_VALID_PAYMENT_RAILS = {"acp", "onchain_btc", "lightning", "x402", "stablecoin"}
 
 CREDITS_PER_COMMERCE_SEARCH_DEFAULT = 1
 
@@ -81,6 +84,15 @@ MEMORY_BLEND_WEIGHT = 0.15
 class SellerRegisterRequest(BaseModel):
     name: str
     checkout_session_url: str
+    # Payment-rail-agnostic support -- checkout_session_url stays the
+    # real, required ACP endpoint (that flow is unchanged); this is
+    # ADDITIONAL info for a buyer-agent that wants to pay a different
+    # way. See crypto_payment_rails.py -- OBSERVE validates the
+    # FORMAT only, never touches the payment itself, same trust
+    # boundary as checkout_session_url always having required "real
+    # https://, never verified to actually work."
+    payment_rail: str = "acp"  # "acp" | "onchain_btc" | "lightning" | "x402" | "stablecoin"
+    payment_uri: Optional[str] = None  # rail-specific: BTC address, Lightning Address, x402 resource URL, EVM address
 
 
 class SellerRegisterResponse(BaseModel):
@@ -121,6 +133,8 @@ class CommerceMatch(BaseModel):
     seller_id: int  # real bug found live: an independent agent had to GUESS this to call /v1/commerce/feedback, since only seller_name was ever returned here
     seller_name: str
     checkout_session_url: str
+    payment_rail: str = "acp"
+    payment_uri: Optional[str] = None
     item_id: str
     name: str
     description: str
@@ -318,6 +332,8 @@ class SellerWithListings(BaseModel):
     seller_id: int
     name: str
     checkout_session_url: str
+    payment_rail: str = "acp"
+    payment_uri: Optional[str] = None
     listings: List[ListingOut]
 
 
@@ -374,6 +390,8 @@ class QuoteOut(BaseModel):
 class SellerImport(BaseModel):
     name: str
     checkout_session_url: str
+    payment_rail: str = "acp"
+    payment_uri: Optional[str] = None
     listings: List[ListingIn] = []
 
 
@@ -470,17 +488,32 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
             _commerce_indices[db_path] = commerce_search_index.CommerceVectorIndex(dim, index_path)
         return _commerce_indices[db_path]
 
-    def _create_seller(key_hash: str, name: str, checkout_session_url: str) -> int:
+    def _create_seller(key_hash: str, name: str, checkout_session_url: str,
+                        payment_rail: str = "acp", payment_uri: Optional[str] = None) -> int:
         """Shared by the single-seller route and /v1/commerce/import so
         both go through identical validation -- no second copy to drift."""
         if not checkout_session_url.startswith("https://"):
             raise HTTPException(status_code=400, detail="checkout_session_url must be https -- ACP checkout sessions carry payment intent, never serve this over plain http")
         if not name.strip():
             raise HTTPException(status_code=400, detail="name must not be empty")
+        if payment_rail not in _VALID_PAYMENT_RAILS:
+            raise HTTPException(status_code=400, detail=f"payment_rail must be one of {sorted(_VALID_PAYMENT_RAILS)}")
+        if payment_rail == "onchain_btc":
+            if not payment_uri or not crypto_payment_rails.validate_onchain_btc_address(payment_uri):
+                raise HTTPException(status_code=400, detail="payment_uri must be a real on-chain BTC address (Base58Check or Bech32/Bech32m, mainnet) for payment_rail=onchain_btc")
+        elif payment_rail == "lightning":
+            if not payment_uri or not crypto_payment_rails.validate_lightning_address(payment_uri):
+                raise HTTPException(status_code=400, detail="payment_uri must be a real Lightning Address (name@domain) for payment_rail=lightning")
+        elif payment_rail == "stablecoin":
+            if not payment_uri or not crypto_payment_rails.validate_evm_address(payment_uri):
+                raise HTTPException(status_code=400, detail="payment_uri must be a real EVM address (0x + 40 hex chars) for payment_rail=stablecoin")
+        elif payment_rail == "x402":
+            if not payment_uri or not payment_uri.startswith("https://"):
+                raise HTTPException(status_code=400, detail="payment_uri must be an https:// x402 resource URL for payment_rail=x402")
         with db.get_conn() as conn:
             cur = conn.execute(
-                "INSERT INTO commerce_sellers (key_hash, name, checkout_session_url, created_at) VALUES (?, ?, ?, ?)",
-                (key_hash, name, checkout_session_url, time.time()),
+                "INSERT INTO commerce_sellers (key_hash, name, checkout_session_url, payment_rail, payment_uri, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (key_hash, name, checkout_session_url, payment_rail, payment_uri, time.time()),
             )
             return cur.lastrowid
 
@@ -545,7 +578,7 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
         raw_key = require_key_fn(authorization)
         if not rate_limit.allow(raw_key):
             raise HTTPException(status_code=429, detail="rate limit exceeded")
-        seller_id = _create_seller(db.hash_key(raw_key), req.name, req.checkout_session_url)
+        seller_id = _create_seller(db.hash_key(raw_key), req.name, req.checkout_session_url, req.payment_rail, req.payment_uri)
         return SellerRegisterResponse(seller_id=seller_id)
 
     @app.post("/v1/commerce/sellers/{seller_id}/listings", response_model=ListingsAddResponse)
@@ -577,6 +610,7 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
                 ).fetchall()
                 out.append(SellerWithListings(
                     seller_id=s["id"], name=s["name"], checkout_session_url=s["checkout_session_url"],
+                    payment_rail=s["payment_rail"], payment_uri=s["payment_uri"],
                     listings=[
                         ListingOut(item_id=l["item_id"], name=l["name"], description=l["description"],
                                    unit_amount=l["unit_amount"], currency=l["currency"], category=l["category"])
@@ -667,7 +701,7 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
         buyer_agents_created = 0
 
         for s in req.sellers:
-            seller_id = _create_seller(key_hash, s.name, s.checkout_session_url)
+            seller_id = _create_seller(key_hash, s.name, s.checkout_session_url, s.payment_rail, s.payment_uri)
             sellers_created += 1
             if s.listings:
                 listings_created += _create_listings(key_hash, seller_id, s.listings)
@@ -728,7 +762,8 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
         with db.get_conn() as conn:
             placeholders = ",".join("?" * len(candidate_listing_ids))
             sql = (
-                f"SELECT l.*, s.name AS seller_name, s.checkout_session_url AS checkout_session_url "
+                f"SELECT l.*, s.name AS seller_name, s.checkout_session_url AS checkout_session_url, "
+                f"s.payment_rail AS payment_rail, s.payment_uri AS payment_uri "
                 f"FROM commerce_listings l JOIN commerce_sellers s ON l.seller_id = s.id "
                 f"WHERE l.id IN ({placeholders})"
             )
@@ -829,6 +864,7 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
         matches = [
             CommerceMatch(
                 score=final_score, seller_id=row["seller_id"], seller_name=row["seller_name"], checkout_session_url=row["checkout_session_url"],
+                payment_rail=row["payment_rail"], payment_uri=row["payment_uri"],
                 item_id=row["item_id"], name=row["name"], description=row["description"],
                 unit_amount=row["unit_amount"], currency=row["currency"], memory_boost=boost, match_id=mid,
             )
