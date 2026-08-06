@@ -99,10 +99,17 @@ battle-tested part of this, and I'd rather hear the real gap now.
   avoid Friday afternoon/weekend.
 - Expect the first comments to poke at: (a) whether the reputation
   system can be gamed by a buyer key colluding with a seller key it also
-  controls -- worth thinking through an honest answer before posting,
-  this isn't currently defended against; (b) whether "self-reported,
-  independently confirmed by both sides" is meaningfully different from
-  a simple two-party escrow -- the honest answer is it's a trust
+  controls -- now has a real, disclosed partial mitigation:
+  VERIFIED_MIN_DISTINCT_SELLERS requires "verified"-tier confirmations
+  to span more than one distinct seller, so a single colluding pair
+  tops out at "trusted," not "verified," no matter how many fake
+  fulfillments they confirm with each other. Honest framing if asked:
+  this raises the cost (a determined operator can still stand up
+  multiple fake seller identities, no KYC exists in v1), it doesn't
+  eliminate the gap -- say that directly rather than overclaiming it's
+  solved; (b) whether "self-reported, independently confirmed by both
+  sides" is meaningfully different from a simple two-party escrow --
+  the honest answer is it's a trust
   *signal*, not a payment guarantee, OBSERVE never touches the money;
   (c) pricing, same as before.
 - The original code-search-focused draft is preserved in git history

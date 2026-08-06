@@ -193,11 +193,16 @@ class ReputationSummary(BaseModel):
     buyer_confirmed_purchases: int
     seller_confirmed_fulfillments: int
     disputes: int
+    distinct_sellers_confirmed: int
     note: str = (
         "Self-reported by both sides, not independently audited -- OBSERVE "
         "never sees the actual checkout (see commerce_router.py's module "
         "docstring). A tier reflects agreement between two disconnected "
-        "parties over real time, not a cryptographic guarantee."
+        "parties over real time, not a cryptographic guarantee. 'verified' "
+        "also requires those confirmations to span multiple distinct "
+        "sellers (see VERIFIED_MIN_DISTINCT_SELLERS) -- this raises, but "
+        "does not eliminate, the cost of a buyer+seller key pair "
+        "manufacturing fake trust with each other."
     )
 
 
@@ -207,6 +212,7 @@ class VerifyMatchResponse(BaseModel):
     buyer_confirmed_purchases: Optional[int] = None
     seller_confirmed_fulfillments: Optional[int] = None
     disputes: Optional[int] = None
+    distinct_sellers_confirmed: Optional[int] = None
 
 
 class NetworkStats(BaseModel):
@@ -258,11 +264,27 @@ TRUSTED_MIN_CONFIRMED = 3
 VERIFIED_MIN_SELLER_CONFIRMED = 5
 VERIFIED_MAX_DISPUTES = 0
 
+# Real, disclosed collusion gap this closes (not fully -- see below): with
+# only VERIFIED_MIN_SELLER_CONFIRMED, one person controlling both a buyer
+# key and a single seller key could manufacture "verified" by searching
+# their own listing and confirming fake fulfillments against themselves,
+# with zero real transactions and zero real trust. Requiring confirmed
+# fulfillments to span at least this many DISTINCT sellers doesn't close
+# the gap (a determined operator can still stand up multiple fake seller
+# identities -- each is just an API key, no KYC exists in v1), but it
+# raises the real cost from "one extra key" to "N extra keys, each with
+# its own registered seller and a plausible-looking listing," which is
+# the honest limit of what's fixable without OBSERVE ever seeing the
+# actual payment (a boundary this project has deliberately kept -- see
+# the module docstring). Judgment call, not a measurement, same caveat
+# as the thresholds above.
+VERIFIED_MIN_DISTINCT_SELLERS = 2
 
-def _compute_tier(buyer_confirmed: int, seller_confirmed: int, disputes: int) -> str:
+
+def _compute_tier(buyer_confirmed: int, seller_confirmed: int, disputes: int, distinct_sellers_confirmed: int = 0) -> str:
     if disputes > VERIFIED_MAX_DISPUTES:
         return "new"  # a real dispute resets trust rather than averaging it away
-    if seller_confirmed >= VERIFIED_MIN_SELLER_CONFIRMED:
+    if seller_confirmed >= VERIFIED_MIN_SELLER_CONFIRMED and distinct_sellers_confirmed >= VERIFIED_MIN_DISTINCT_SELLERS:
         return "verified"
     if buyer_confirmed >= TRUSTED_MIN_CONFIRMED or seller_confirmed >= 1:
         return "trusted"
@@ -934,12 +956,24 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
                 "WHERE m.buyer_key_hash = ? AND sf.outcome = 'disputed'",
                 (key_hash,),
             ).fetchone()["n"]
+            # See VERIFIED_MIN_DISTINCT_SELLERS above -- how many DIFFERENT
+            # sellers confirmed a fulfillment, not just how many fulfillments
+            # total. A single colluding buyer+seller pair maxes this out at 1
+            # no matter how many fake transactions they confirm with each
+            # other.
+            distinct_sellers_confirmed = conn.execute(
+                "SELECT COUNT(DISTINCT m.seller_id) AS n FROM commerce_seller_feedback sf "
+                "JOIN commerce_matches m ON sf.match_id = m.match_id "
+                "WHERE m.buyer_key_hash = ? AND sf.outcome = 'fulfilled'",
+                (key_hash,),
+            ).fetchone()["n"]
         return {
-            "tier": _compute_tier(buyer_confirmed, seller_confirmed, disputes),
+            "tier": _compute_tier(buyer_confirmed, seller_confirmed, disputes, distinct_sellers_confirmed),
             "total_matches": total_matches,
             "buyer_confirmed_purchases": buyer_confirmed,
             "seller_confirmed_fulfillments": seller_confirmed,
             "disputes": disputes,
+            "distinct_sellers_confirmed": distinct_sellers_confirmed,
         }
 
     @app.post("/v1/commerce/seller-feedback", response_model=SellerFeedbackResponse)
@@ -1012,6 +1046,7 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
             buyer_confirmed_purchases=rep["buyer_confirmed_purchases"],
             seller_confirmed_fulfillments=rep["seller_confirmed_fulfillments"],
             disputes=rep["disputes"],
+            distinct_sellers_confirmed=rep["distinct_sellers_confirmed"],
         )
 
     @app.get("/v1/commerce/network-stats", response_model=NetworkStats)

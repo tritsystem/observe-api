@@ -1,0 +1,18 @@
+[Unit]
+Description=OBSERVE Search API (uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=gbran
+WorkingDirectory=/home/gbran/observe-api
+EnvironmentFile=/home/gbran/observe-api/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m uvicorn server:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/gbran/observe-api/server.log
+StandardError=append:/home/gbran/observe-api/server.log
+
+[Install]
+WantedBy=multi-user.target

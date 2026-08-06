@@ -578,16 +578,10 @@ def test_reputation_starts_at_new_tier(client, fresh_db):
     assert body["total_matches"] == 0
 
 
-def test_reputation_reaches_verified_after_real_seller_confirmed_fulfillments(client, fresh_db):
-    """The actual point of the two-sided system: a buyer's own
-    self-reported 'purchased' claims alone should NOT be enough for
-    verified -- it takes the SELLER (an independent party) confirming
-    real fulfillments."""
-    buyer_key = _signup_and_fund(client, fresh_db, email="buyer@example.com")
-    seller_key = _signup_and_fund(client, fresh_db, email="seller-owner@example.com")
+def _register_seller_with_boots(client, seller_key, name):
     seller_id = client.post(
         "/v1/commerce/sellers",
-        json={"name": "Trusted Store", "checkout_session_url": "https://store.example.com/checkout_sessions"},
+        json={"name": name, "checkout_session_url": "https://store.example.com/checkout_sessions"},
         headers={"Authorization": f"Bearer {seller_key}"},
     ).json()["seller_id"]
     client.post(
@@ -595,22 +589,70 @@ def test_reputation_reaches_verified_after_real_seller_confirmed_fulfillments(cl
         json={"listings": [{"item_id": "sku-1", "name": "Boots", "description": "hiking boot waterproof", "unit_amount": 12000}]},
         headers={"Authorization": f"Bearer {seller_key}"},
     )
+    return seller_id
 
-    for _ in range(5):
-        match_id = client.post(
-            "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
-            headers={"Authorization": f"Bearer {buyer_key}"},
-        ).json()["matches"][0]["match_id"]
-        resp = client.post(
-            "/v1/commerce/seller-feedback",
-            json={"match_id": match_id, "outcome": "fulfilled", "rating": 5},
-            headers={"Authorization": f"Bearer {seller_key}"},
-        )
-        assert resp.status_code == 200
+
+def _confirm_fulfillment(client, buyer_key, seller_key, seller_id):
+    # Two sellers in the same test can have near-identical listings (both
+    # sell "boots"), so don't assume matches[0] is the intended seller --
+    # pick the match that actually belongs to it, same as a real buyer
+    # agent would need to.
+    matches = client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots", "k": 10},
+        headers={"Authorization": f"Bearer {buyer_key}"},
+    ).json()["matches"]
+    match_id = next(m["match_id"] for m in matches if m["seller_id"] == seller_id)
+    resp = client.post(
+        "/v1/commerce/seller-feedback",
+        json={"match_id": match_id, "outcome": "fulfilled", "rating": 5},
+        headers={"Authorization": f"Bearer {seller_key}"},
+    )
+    assert resp.status_code == 200
+
+
+def test_reputation_reaches_verified_after_real_seller_confirmed_fulfillments(client, fresh_db):
+    """The actual point of the two-sided system: a buyer's own
+    self-reported 'purchased' claims alone should NOT be enough for
+    verified -- it takes independent SELLERS confirming real fulfillments,
+    spanning more than one seller (see
+    test_single_seller_repeated_fulfillments_cannot_reach_verified_alone
+    for why one seller alone isn't enough, even confirmed many times)."""
+    buyer_key = _signup_and_fund(client, fresh_db, email="buyer@example.com")
+    seller_a_key = _signup_and_fund(client, fresh_db, email="seller-a@example.com")
+    seller_b_key = _signup_and_fund(client, fresh_db, email="seller-b@example.com")
+    seller_a_id = _register_seller_with_boots(client, seller_a_key, "Trusted Store A")
+    seller_b_id = _register_seller_with_boots(client, seller_b_key, "Trusted Store B")
+
+    for _ in range(3):
+        _confirm_fulfillment(client, buyer_key, seller_a_key, seller_a_id)
+    for _ in range(2):
+        _confirm_fulfillment(client, buyer_key, seller_b_key, seller_b_id)
 
     rep = client.get("/v1/commerce/my-reputation", headers={"Authorization": f"Bearer {buyer_key}"}).json()
     assert rep["tier"] == "verified"
     assert rep["seller_confirmed_fulfillments"] == 5
+    assert rep["distinct_sellers_confirmed"] == 2
+
+
+def test_single_seller_repeated_fulfillments_cannot_reach_verified_alone(client, fresh_db):
+    """Collusion-resistance regression: one buyer key and one seller key
+    (which could be the same real person controlling both) confirming
+    fulfillments against EACH OTHER, no matter how many times, must not
+    be enough to manufacture 'verified' -- that requires
+    VERIFIED_MIN_DISTINCT_SELLERS distinct sellers, not just
+    VERIFIED_MIN_SELLER_CONFIRMED confirmations from one relationship."""
+    buyer_key = _signup_and_fund(client, fresh_db, email="colluding-buyer@example.com")
+    seller_key = _signup_and_fund(client, fresh_db, email="colluding-seller@example.com")
+    seller_id = _register_seller_with_boots(client, seller_key, "Solo Seller")
+
+    for _ in range(10):  # well past VERIFIED_MIN_SELLER_CONFIRMED, still just one seller
+        _confirm_fulfillment(client, buyer_key, seller_key, seller_id)
+
+    rep = client.get("/v1/commerce/my-reputation", headers={"Authorization": f"Bearer {buyer_key}"}).json()
+    assert rep["seller_confirmed_fulfillments"] == 10
+    assert rep["distinct_sellers_confirmed"] == 1
+    assert rep["tier"] == "trusted"  # real signal, just not the strongest one
+    assert rep["tier"] != "verified"
 
 
 def test_a_single_dispute_resets_tier_to_new(client, fresh_db):

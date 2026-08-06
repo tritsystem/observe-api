@@ -152,6 +152,7 @@ def get_my_reputation(api_key: Optional[str] = None) -> str:
         f"Total matches: {d['total_matches']}\n"
         f"Buyer-confirmed purchases: {d['buyer_confirmed_purchases']}\n"
         f"Seller-confirmed fulfillments: {d['seller_confirmed_fulfillments']}\n"
+        f"Distinct sellers confirmed: {d['distinct_sellers_confirmed']}\n"
         f"Disputes: {d['disputes']}"
     )
 
@@ -179,6 +180,7 @@ def verify_match(match_id: str, api_key: Optional[str] = None) -> str:
         f"Tier: {d['tier']}\n"
         f"Buyer-confirmed purchases: {d['buyer_confirmed_purchases']}\n"
         f"Seller-confirmed fulfillments: {d['seller_confirmed_fulfillments']}\n"
+        f"Distinct sellers confirmed: {d['distinct_sellers_confirmed']}\n"
         f"Disputes: {d['disputes']}"
     )
 

@@ -556,11 +556,14 @@
     <div class="terminal mono">
       <div class="line"><span class="prompt">$</span> observe commerce-reputation</div>
       <div class="line"><span class="comment">→ Tier: trusted</span></div>
-      <div class="line"><span class="comment">  Buyer-confirmed purchases: 1   Seller-confirmed fulfillments: 1   Disputes: 0</span></div>
+      <div class="line"><span class="comment">  Buyer-confirmed purchases: 1   Seller-confirmed fulfillments: 1   Distinct sellers confirmed: 1   Disputes: 0</span></div>
+      <div class="line">&nbsp;</div>
+      <div class="line"><span class="comment"># "verified" needs seller-confirmed fulfillments from more than one distinct seller --</span></div>
+      <div class="line"><span class="comment"># closes the obvious gap where one buyer key + one seller key could confirm fake purchases with only each other</span></div>
       <div class="line">&nbsp;</div>
       <div class="line"><span class="comment"># and any seller can check an incoming buyer the same way, without seeing their identity:</span></div>
       <div class="line"><span class="prompt">$</span> observe commerce-verify-match 1a75e62e-...</div>
-      <div class="line"><span class="comment">→ Tier: trusted   Seller-confirmed fulfillments: 1   Disputes: 0</span></div>
+      <div class="line"><span class="comment">→ Tier: trusted   Seller-confirmed fulfillments: 1   Distinct sellers confirmed: 1   Disputes: 0</span></div>
     </div>
 
     <p class="body-copy" style="margin-top:28px;"><strong>7. The whole network's health is public</strong> — no key needed, nothing individually identifiable.</p>
