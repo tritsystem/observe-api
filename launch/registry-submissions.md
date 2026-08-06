@@ -18,8 +18,9 @@ format, open a PR.
 ```
 - [OBSERVE Search API](https://github.com/gbranaa4-hue/012-trit-search) -
   Pay-per-query semantic code search over curated open source repos
-  (React, Django, NumPy, and more). API-key auth, prepaid credits, priced
-  under the token cost it saves.
+  (React, Django, NumPy, and more), plus a real ACP/UCP-compatible agent
+  commerce discovery and reputation layer. API-key auth, prepaid
+  credits, priced under the token cost it saves.
 ```
 
 ## 2. Smithery (smithery.ai)
@@ -29,8 +30,14 @@ via the Smithery CLI, or the web dashboard at smithery.ai.
 
 **Metadata**:
 - Name: `observe-search-mcp`
-- One-sentence description: "Pay-per-query semantic code search over curated open source repos, priced under the tokens it saves."
-- Tool count: 3 (`search_code_hosted`, `list_repos_hosted`, `check_balance`)
+- One-sentence description: "Semantic code search plus ACP/UCP agent commerce discovery and reputation, priced under the tokens/fees it saves."
+- Tool count: 11 (`search_code_hosted`, `list_repos_hosted`, `check_balance`,
+  `register_seller_hosted`, `add_listings_hosted`, `commerce_search_hosted`,
+  `report_purchase_feedback_hosted`, `report_seller_feedback_hosted`,
+  `check_my_reputation_hosted`, `verify_match_hosted`, `commerce_network_stats_hosted`)
+  -- verified against `observe_search_mcp/server.py` directly, not assumed.
+  The dashboard's buyer-agent-profile/import endpoints aren't wired into MCP
+  yet, a real, not-yet-closed gap worth knowing about before publishing.
 - Transport: stdio
 - GitHub: the observe-api repo (once pushed to a public remote)
 - Homepage: the landing page

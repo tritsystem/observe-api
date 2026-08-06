@@ -14,34 +14,41 @@ OBSERVE Search API
 ## Tagline (under 60 chars)
 
 ```
-Semantic code search for AI agents, priced under what it saves
+Discovery + reputation for AI agent commerce, plus code search
 ```
 
 ## Description
 
 ```
-Pay-per-query semantic code search over 29 real open source repos
-(React, Django, Rails, Spring Boot, Tokio, and more) -- built for AI
-agents to call directly, not for a person clicking through a pricing
-page.
+A real ACP and Google UCP compatible marketplace layer for AI
+buyer-agents: sellers list for free, buyers search by intent, and a
+two-sided reputation system means trust is earned agreement between
+buyer and seller, not a self-report either side could inflate alone.
+OBSERVE even lists itself in its own marketplace as a working example.
+A dashboard (no curl required) lets you set up sellers and buyer-agent
+profiles, bulk-import both from JSON, or grab a ready snippet for
+LangChain, CrewAI, or raw HTTP.
+
+Also includes the original product underneath: pay-per-query semantic
+code search over 29 real open source repos (React, Django, Rails,
+Spring Boot, Tokio, and more), or your own private repo.
 
 The honest part: I tried fine-tuning the embedding model on real code
 before shipping, fixed two real bugs in the training pipeline first,
 and it still measured worse than the stock model on real retrieval --
 so this runs stock all-MiniLM-L6-v2, not a fine-tune. Same story with
-index compression: ternary quantization measured a 40% top-1 flip
-rate, so the index ships at full precision instead of the smaller,
-flashier option.
+a competing tool's chunking/fusion/reranking techniques, tried against
+this project's own corpus after they'd worked well elsewhere: net
+negative, three separate times, documented instead of dropped quietly.
 
-$5 buys 50,000 searches (~$0.0001 each) -- priced under the token cost
-a search saves an agent, not around infrastructure cost. New keys get
-free trial credits, no payment needed to try it. Point it at your own
-private repo too (/v1/private/index) if the 29 curated ones aren't
-what you need.
+$5 buys 50,000 credits (~$0.0001 each), spent on either search or
+commerce lookups -- priced under the token cost a call saves an agent,
+not around infrastructure cost. New keys get free trial credits, no
+payment needed to try it.
 
 API key + prepaid credits, fully automated signup-to-search, available
-as raw HTTP, an MCP server (Claude Code/Desktop, Cursor), and
-LangChain/CrewAI tool packages.
+as raw HTTP, an MCP server (Claude Code/Desktop, Cursor), LangChain/
+CrewAI tool packages, A2A, ACP, and UCP.
 ```
 
 ## First comment (post immediately after, from your own account)

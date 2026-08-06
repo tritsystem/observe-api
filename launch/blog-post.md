@@ -84,16 +84,53 @@ handful of searches by hand.
 - An MCP server, so it drops into Claude Code, Claude Desktop, or Cursor
   as a tool
 - LangChain and CrewAI wrappers for agents built on those frameworks
-- Fifteen real repos indexed to start (React, Django, NumPy, Tokio,
-  and more), refreshed from their default branch
+- Twenty-nine real repos indexed to start (React, Django, NumPy, Tokio,
+  and more), refreshed from their default branch, plus on-demand private
+  indexing of any repo you point it at
 
 ## What it isn't (yet)
 
-One shared index, not per-customer -- if you want to search *your own*
-private code through this, that's a real multi-tenant isolation feature
-that doesn't exist yet, not something I'm pretending is already solved.
-One fixed credit package, no tiers. All disclosed in the repo's README,
-not hidden behind a "contact sales" wall.
+One shared index, not per-customer, for the *public* repo catalog --
+private indexing exists (`/v1/private/index`) and is isolated per API
+key, but that's a real one-time compute cost, priced differently from a
+marginal search. One fixed credit package, no tiers. All disclosed in
+the repo's README, not hidden behind a "contact sales" wall.
+
+## The same pricing logic, applied to a second problem
+
+Since writing the above, the same "what does the buyer's alternative
+actually cost" question came up again, in a different shape: the
+Agentic Commerce Protocol (OpenAI + Stripe) and Google's UCP both define
+checkout between a buyer-agent and one merchant it already knows about.
+Neither says how a buyer-agent *finds* sellers across many merchants, or
+decides whether to trust one it hasn't dealt with before -- I read both
+specs directly to confirm this wasn't just an impression, and both
+explicitly punt that problem to "the marketplace layer above this API."
+
+That layer is now a real part of this project too: sellers list for
+free (same logic as OpenAI's own ACP model -- discovery costs the
+platform nothing marginal, so it shouldn't cost the seller anything
+either), buyers search by intent using the exact same embedding pipeline
+described above, and a shared `match_id` lets both sides of a real
+transaction independently confirm what happened -- so a buyer's
+reputation is earned agreement between two disconnected parties, not a
+self-report either side could inflate alone. It's reachable as both ACP
+and UCP from one implementation, and it's dogfooded for real: this
+product lists itself in its own marketplace, with its own real ACP
+checkout endpoint.
+
+I did try to close the code-search gap with a real competitor
+(Semble, `MinishLab/semble` -- tree-sitter chunking + a static embedding
+model + BM25/RRF, a credible ~98%-fewer-tokens-than-grep claim that got
+real traction on HN this year) before writing this. Three of its
+techniques, tested against OBSERVE's own 759k-chunk corpus: function-
+boundary chunking, RRF fusion, and a definition-vs-reference reranking
+signal. All three measured net negative, for related reasons -- mostly
+a cross-repo contamination failure mode a shared multi-repo index is
+specifically exposed to. Documented honestly in the README instead of
+quietly shelved. I'd rather this post undersell code search than
+overclaim it; the commerce/reputation layer is the newer, less
+contested part of the pitch.
 
 [link to landing page]
 [link to GitHub repo]
