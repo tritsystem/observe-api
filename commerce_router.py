@@ -281,6 +281,12 @@ VERIFIED_MAX_DISPUTES = 0
 # as the thresholds above.
 VERIFIED_MIN_DISTINCT_SELLERS = 2
 
+# A quote longer-lived than this is functionally a price commitment
+# forever, which OBSERVE has no way to actually enforce -- capped rather
+# than unbounded to keep "signed at time T" meaningfully close to when a
+# buyer-agent actually acts on it. Judgment call, not a measurement.
+MAX_QUOTE_TTL_SECONDS = 3600
+
 
 def _compute_tier(buyer_confirmed: int, seller_confirmed: int, disputes: int, distinct_sellers_confirmed: int = 0) -> str:
     if disputes > VERIFIED_MAX_DISPUTES:
@@ -335,9 +341,34 @@ class DeleteResponse(BaseModel):
 
 
 class ReceiptOut(BaseModel):
-    event_type: str  # "commerce.match" | "commerce.buyer_feedback" | "commerce.seller_feedback"
+    event_type: str  # "commerce.match" | "commerce.buyer_feedback" | "commerce.seller_feedback" | "commerce.quote"
     jws: str  # compact JWS -- verify against GET /.well-known/observe-commerce-signing-key
     created_at: float
+
+
+class QuoteRequest(BaseModel):
+    match_id: Optional[str] = None  # preferred -- ties the quote back to a real search
+    seller_id: Optional[int] = None  # alternative to match_id, e.g. quoting a listing found another way
+    item_id: Optional[str] = None
+    ttl_seconds: int = 900  # 15 min default, capped at MAX_QUOTE_TTL_SECONDS
+
+
+class QuoteOut(BaseModel):
+    quote_id: str
+    seller_id: int
+    item_id: str
+    unit_amount: Optional[int]
+    currency: str
+    expires_at: float
+    created_at: float
+    jws: str
+    note: str = (
+        "A signed record of the price OBSERVE observed this listing "
+        "offered at, valid until expires_at -- not an escrow and not a "
+        "guarantee the seller honors it (OBSERVE never touches payment). "
+        "Useful as evidence if a seller's real checkout price disagrees "
+        "with what was quoted."
+    )
 
 
 class SellerImport(BaseModel):
@@ -1192,23 +1223,98 @@ def register_commerce_routes(app: FastAPI, engine, db, rate_limit, require_key_f
             ),
         )
 
-    @app.get("/v1/commerce/receipts/{match_id}", response_model=List[ReceiptOut])
-    def commerce_receipts_for_match(match_id: str):
+    @app.get("/v1/commerce/receipts/{subject_id}", response_model=List[ReceiptOut])
+    def commerce_receipts_for_match(subject_id: str):
         """Public, no API key needed -- deliberately, since the whole
         point of a signed receipt is that a third party can verify it
-        WITHOUT trusting this API or holding an OBSERVE key. match_id
-        itself is an unguessable UUID (the real capability), same
-        assumption /v1/commerce/verify-match's match_id already relies
-        on. Verify any returned jws against
+        WITHOUT trusting this API or holding an OBSERVE key. subject_id
+        is an unguessable UUID -- either a match_id or a quote_id, both
+        stored in the same commerce_receipts.match_id column (a pragmatic
+        reuse, not a schema migration, since both are just "the real
+        event this receipt is about"). Verify any returned jws against
         GET /.well-known/observe-commerce-signing-key -- a mismatch means
         either the receipt was tampered with, or it wasn't issued by this
         key at all."""
         with db.get_conn() as conn:
             rows = conn.execute(
                 "SELECT event_type, jws, created_at FROM commerce_receipts WHERE match_id = ? ORDER BY created_at ASC",
-                (match_id,),
+                (subject_id,),
             ).fetchall()
         return [ReceiptOut(event_type=r["event_type"], jws=r["jws"], created_at=r["created_at"]) for r in rows]
+
+    @app.post("/v1/commerce/quotes", response_model=QuoteOut)
+    def request_quote(req: QuoteRequest, authorization: Optional[str] = Header(None)):
+        """Locks a listing's current price/currency at request time, with
+        a real expiry, and issues a signed commerce.quote receipt for it
+        -- see db.py's commerce_quotes comment for the real gap this
+        closes and its real limit (not an escrow, not enforceable)."""
+        raw_key = require_key_fn(authorization)
+        if not rate_limit.allow(raw_key):
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
+        key_hash = db.hash_key(raw_key)
+
+        seller_id, item_id = req.seller_id, req.item_id
+        if req.match_id:
+            with db.get_conn() as conn:
+                match = conn.execute(
+                    "SELECT * FROM commerce_matches WHERE match_id = ? AND buyer_key_hash = ?",
+                    (req.match_id, key_hash),
+                ).fetchone()
+            if match is None:
+                raise HTTPException(status_code=404, detail="no match_id found for this key -- it must be one returned by your own earlier /v1/commerce/search call")
+            seller_id, item_id = match["seller_id"], match["item_id"]
+        if seller_id is None or item_id is None:
+            raise HTTPException(status_code=400, detail="either match_id, or both seller_id and item_id, are required")
+
+        with db.get_conn() as conn:
+            listing = conn.execute(
+                "SELECT * FROM commerce_listings WHERE seller_id = ? AND item_id = ?", (seller_id, item_id)
+            ).fetchone()
+        if listing is None:
+            raise HTTPException(status_code=404, detail="no listing with that seller_id/item_id")
+
+        ttl = max(1, min(req.ttl_seconds, MAX_QUOTE_TTL_SECONDS))
+        now = time.time()
+        expires_at = now + ttl
+        quote_id = str(uuid.uuid4())
+        with db.get_conn() as conn:
+            conn.execute(
+                "INSERT INTO commerce_quotes (quote_id, buyer_key_hash, seller_id, item_id, unit_amount, currency, match_id, expires_at, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (quote_id, key_hash, seller_id, item_id, listing["unit_amount"], listing["currency"], req.match_id, expires_at, now),
+            )
+        jws = _issue_receipt(quote_id, "commerce.quote", {
+            "type": "commerce.quote", "quote_id": quote_id, "buyer_key_hash": key_hash,
+            "seller_id": seller_id, "item_id": item_id, "unit_amount": listing["unit_amount"],
+            "currency": listing["currency"], "match_id": req.match_id,
+            "expires_at": expires_at, "created_at": now,
+        })
+        return QuoteOut(
+            quote_id=quote_id, seller_id=seller_id, item_id=item_id,
+            unit_amount=listing["unit_amount"], currency=listing["currency"],
+            expires_at=expires_at, created_at=now, jws=jws,
+        )
+
+    @app.get("/v1/commerce/quotes/{quote_id}", response_model=QuoteOut)
+    def get_quote(quote_id: str):
+        """Public, no API key needed -- same reasoning as the receipts
+        endpoint: a seller deciding whether to honor a quote a buyer
+        presents shouldn't need an OBSERVE key to check it."""
+        with db.get_conn() as conn:
+            q = conn.execute("SELECT * FROM commerce_quotes WHERE quote_id = ?", (quote_id,)).fetchone()
+        if q is None:
+            raise HTTPException(status_code=404, detail="no quote with that id")
+        with db.get_conn() as conn:
+            receipt = conn.execute(
+                "SELECT jws FROM commerce_receipts WHERE match_id = ? AND event_type = 'commerce.quote'",
+                (quote_id,),
+            ).fetchone()
+        return QuoteOut(
+            quote_id=q["quote_id"], seller_id=q["seller_id"], item_id=q["item_id"],
+            unit_amount=q["unit_amount"], currency=q["currency"],
+            expires_at=q["expires_at"], created_at=q["created_at"],
+            jws=receipt["jws"] if receipt else "",
+        )
 
     @app.get("/.well-known/observe-commerce-signing-key")
     def observe_commerce_signing_key():

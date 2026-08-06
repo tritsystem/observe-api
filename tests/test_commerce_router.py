@@ -7,6 +7,7 @@ outrank a laptop listing) rather than just checking the endpoint returns
 200.
 """
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -1042,3 +1043,89 @@ def test_receipts_for_unknown_match_id_returns_empty_list(client, fresh_db):
     resp = client.get("/v1/commerce/receipts/not-a-real-match-id")
     assert resp.status_code == 200
     assert resp.json() == []
+
+
+def test_quote_via_match_id_locks_current_price_with_a_verifiable_receipt(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db, email="quote-buyer1@example.com")
+    _make_seller_and_listing(client, api_key, item_id="sku-quote")
+    match_id = client.post(
+        "/v1/commerce/search", json={"intent": "waterproof hiking boots"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    ).json()["matches"][0]["match_id"]
+
+    before = time.time()
+    resp = client.post(
+        "/v1/commerce/quotes", json={"match_id": match_id},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+    q = resp.json()
+    assert q["unit_amount"] == 12000  # the real listing price, not a fixture-invented one
+    assert q["currency"] == "usd"
+    assert q["expires_at"] > before
+
+    payload = _verify_receipt(client, q["jws"])
+    assert payload["type"] == "commerce.quote"
+    assert payload["quote_id"] == q["quote_id"]
+    assert payload["unit_amount"] == 12000
+
+
+def test_quote_via_seller_id_and_item_id_without_a_match(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db, email="quote-buyer2@example.com")
+    seller_id = _make_seller_and_listing(client, api_key, item_id="sku-quote2")
+    resp = client.post(
+        "/v1/commerce/quotes", json={"seller_id": seller_id, "item_id": "sku-quote2"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["seller_id"] == seller_id
+
+
+def test_quote_requires_match_id_or_seller_and_item(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db, email="quote-buyer3@example.com")
+    resp = client.post("/v1/commerce/quotes", json={}, headers={"Authorization": f"Bearer {api_key}"})
+    assert resp.status_code == 400
+
+
+def test_quote_for_unknown_listing_404s(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db, email="quote-buyer4@example.com")
+    resp = client.post(
+        "/v1/commerce/quotes", json={"seller_id": 999999, "item_id": "does-not-exist"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    assert resp.status_code == 404
+
+
+def test_quote_ttl_is_capped_at_max(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db, email="quote-buyer5@example.com")
+    seller_id = _make_seller_and_listing(client, api_key, item_id="sku-quote5")
+    resp = client.post(
+        "/v1/commerce/quotes",
+        json={"seller_id": seller_id, "item_id": "sku-quote5", "ttl_seconds": 999999999},
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    q = resp.json()
+    assert q["expires_at"] <= q["created_at"] + commerce_router.MAX_QUOTE_TTL_SECONDS + 1
+
+
+def test_get_quote_by_id_is_public_and_matches_the_original(client, fresh_db):
+    api_key = _signup_and_fund(client, fresh_db, email="quote-buyer6@example.com")
+    seller_id = _make_seller_and_listing(client, api_key, item_id="sku-quote6")
+    created = client.post(
+        "/v1/commerce/quotes", json={"seller_id": seller_id, "item_id": "sku-quote6"},
+        headers={"Authorization": f"Bearer {api_key}"},
+    ).json()
+
+    fetched = client.get(f"/v1/commerce/quotes/{created['quote_id']}").json()  # no auth header
+    assert fetched["unit_amount"] == created["unit_amount"]
+    assert fetched["jws"] == created["jws"]
+
+
+def test_get_unknown_quote_404s(client, fresh_db):
+    resp = client.get("/v1/commerce/quotes/not-a-real-quote-id")
+    assert resp.status_code == 404
+
+
+def test_quote_requires_auth(client, fresh_db):
+    resp = client.post("/v1/commerce/quotes", json={"seller_id": 1, "item_id": "x"})
+    assert resp.status_code == 401

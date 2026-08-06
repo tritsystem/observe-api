@@ -173,6 +173,29 @@ def init_db():
                 created_at REAL NOT NULL
             )
         """)
+        # A quote LOCKS a listing's price/currency at a point in time, with
+        # a real expiry -- closes a real gap: without this, a listing's
+        # unit_amount is just whatever's live in commerce_listings at
+        # query time, no protection for a buyer-agent against a seller
+        # changing the price between when it saw a match and when it
+        # actually acts on it (or vice versa -- a seller has no record of
+        # what was actually offered if a buyer claims a different price
+        # later). OBSERVE still never touches payment -- this is a signed
+        # record of what price was observed being offered when, not an
+        # escrow or a guarantee the seller will honor it.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS commerce_quotes (
+                quote_id TEXT PRIMARY KEY,
+                buyer_key_hash TEXT NOT NULL,
+                seller_id INTEGER NOT NULL,
+                item_id TEXT NOT NULL,
+                unit_amount INTEGER,
+                currency TEXT NOT NULL,
+                match_id TEXT,
+                expires_at REAL NOT NULL,
+                created_at REAL NOT NULL
+            )
+        """)
         # Ed25519/JWS-signed receipts (see commerce_receipts.py) for real
         # commerce events -- a match happening, a buyer/seller reporting an
         # outcome. Independently verifiable by any third party against
