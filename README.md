@@ -5,7 +5,7 @@ repos, built for AI agents to call directly. API key + prepaid credits,
 fully automated signup-to-search loop -- no human review anywhere in that
 path.
 
-Built on top of [OBSERVE](https://github.com/gbranaa4-hue/012-trit-search)'s
+Built on top of [OBSERVE](https://github.com/tritsystem/012-trit-search)'s
 existing `SearchEngine` (embedding-based semantic search, function-boundary
 chunking) -- `search_engine.py` here is that class extracted from OBSERVE's
 desktop GUI file into a standalone module with no GUI dependency, so a
@@ -102,7 +102,7 @@ candidates instead of ranked answers**, each with a `verification_hint`
 suggesting a concrete falsification test (isolate the candidate, re-run the
 behavior you're investigating, see if it persists). Template-only in v1 --
 no LLM call, no added cost, same credit price as a normal search. Motivated
-by [gbranaa4-hue/methodlm](https://github.com/gbranaa4-hue/methodlm)'s
+by [tritsystem/methodlm](https://github.com/tritsystem/methodlm)'s
 causal-discipline framing (pre-register a hypothesis, falsify before
 confirming) applied to code search instead of tabular data.
 
