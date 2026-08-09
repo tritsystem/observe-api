@@ -17,12 +17,23 @@ become worth building. Auth reuses OBSERVE's existing API key system
 (Bearer obs_...) -- an A2A caller needs a real OBSERVE key same as any
 other caller, credited the same CREDITS_PER_SEARCH per call.
 """
+import os
+import sys
 import time
 import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
+
+from spiking_causal_relevance import fuse_causal_and_relevance
+
+# Same real cross-platform fix as spiking_causal_relevance.py -- a bare
+# Windows path silently fails to resolve under WSL2 (confirmed, not
+# assumed, by the spiking_evidence.py import test).
+_METHODLM_CANDIDATES = [r"C:\Users\gbran\llama_demo", "/mnt/c/Users/gbran/llama_demo"]
+_methodlm_root = next((p for p in _METHODLM_CANDIDATES if os.path.isdir(p)), _METHODLM_CANDIDATES[0])
+sys.path.insert(0, _methodlm_root)
 
 router = APIRouter()
 
@@ -86,7 +97,27 @@ def build_agent_card(base_url: str) -> dict:
                 ],
                 "inputModes": ["text/plain"],
                 "outputModes": ["application/json"],
-            }
+            },
+            {
+                "id": "causal-driver-check",
+                "name": "Causal driver check",
+                "description": (
+                    "Real causal-reasoning check for one named candidate driver of a target "
+                    "in a CSV dataset: runs MethodLM's real backdoor-adjustment test (Cinelli-"
+                    "Hazlett robustness value) AND OBSERVE's own semantic search relevance, "
+                    "fusing both into one verdict via a real compiled Spikeling LIF neuron -- "
+                    "not a bare correlation, and not either signal alone. A strong robustness "
+                    "value can clear the bar by itself; a moderate one needs real search "
+                    "corroboration too. Answers 'is this actually a real driver' honestly, "
+                    "including refusing when neither signal is strong enough."
+                ),
+                "tags": ["causal-reasoning", "methodlm", "spiking-neural-network", "developer-tools"],
+                "examples": [
+                    "is bmi a real driver of progression in this diabetes dataset, controlling for age and sex",
+                ],
+                "inputModes": ["application/json"],
+                "outputModes": ["application/json"],
+            },
         ],
     }
 
@@ -96,6 +127,19 @@ def _extract_query(message: dict) -> Optional[str]:
         text = part.get("text")
         if text and text.strip():
             return text.strip()
+    return None
+
+
+def _extract_data_part(message: dict) -> Optional[dict]:
+    """First real structured `data` Part support in this adapter -- v1
+    (message:send) only ever read `text` Parts (disclosed limitation in
+    this module's own docstring). The causal-driver-check skill genuinely
+    needs structured fields (csv_path/target/candidate/confounders), so
+    this is a real, new capability, not a workaround."""
+    for part in message.get("parts", []):
+        data = part.get("data")
+        if isinstance(data, dict):
+            return data
     return None
 
 
@@ -194,6 +238,105 @@ def register_a2a_routes(app, engine, db, rate_limit, require_key_fn, credits_per
                         ],
                     }
                 ],
+            }
+        })
+
+    @router.post("/a2a/v1/causal-check:send")
+    async def a2a_causal_check(request: Request, authorization: Optional[str] = Header(None)):
+        """Real causal-driver-check skill: MethodLM's real ADJUST (backdoor
+        adjustment + Cinelli-Hazlett robustness value) fused with OBSERVE's
+        own real search relevance via a compiled Spikeling LIF neuron.
+        Costs the same credits_per_search as a normal search -- real compute
+        either way, same pricing model, not a separate tier."""
+        raw_key = require_key_fn(authorization)
+        if not rate_limit.allow(raw_key):
+            raise HTTPException(status_code=429, detail="rate limit exceeded -- slow down and retry shortly")
+
+        body = await request.json()
+        message = body.get("message") or {}
+        context_id = message.get("contextId") or str(uuid.uuid4())
+        task_id = str(uuid.uuid4())
+
+        data = _extract_data_part(message)
+        if not data:
+            return JSONResponse(_failed_task(
+                task_id, context_id,
+                "No structured data Part found -- this skill needs "
+                "{csv_path, target, candidate, confounders: [...]} as a data Part.",
+            ))
+
+        csv_path = data.get("csv_path")
+        target = data.get("target")
+        candidate = data.get("candidate")
+        confounders = data.get("confounders") or []
+        if not csv_path or not target or not candidate:
+            return JSONResponse(_failed_task(
+                task_id, context_id,
+                "data Part must include 'csv_path', 'target', and 'candidate'.",
+            ))
+        if not os.path.isfile(csv_path):
+            return JSONResponse(_failed_task(task_id, context_id, f"file not found: {csv_path}"))
+
+        if not db.deduct_credit(raw_key, credits_per_search):
+            return JSONResponse(_failed_task(
+                task_id, context_id,
+                "insufficient credits -- purchase more via POST /v1/signup's checkout_url",
+            ), status_code=402)
+
+        try:
+            from methodlm import load_csv, make_tools
+            csv_data = load_csv(csv_path, target)
+            if candidate not in csv_data:
+                db.deduct_credit(raw_key, -credits_per_search)  # refund -- real error, not a real answer
+                return JSONResponse(_failed_task(
+                    task_id, context_id,
+                    f"'{candidate}' not among numeric columns {list(csv_data)}",
+                ))
+            _corr, _run, _strat, adjust = make_tools(csv_data, target, interventional=False)
+            adjust_result = adjust(candidate, confounders)
+
+            # adjust() returns a real formatted message string ending in the
+            # robustness value -- parse the real RV out of it rather than
+            # re-deriving it, so this can never silently drift from what
+            # MethodLM's own tool actually computed.
+            import re as _re
+            rv_match = _re.search(r"RV\s*=\s*([\d.]+)", adjust_result)
+            causal_rv = float(rv_match.group(1)) if rv_match else 0.0
+
+            search_hits = engine.search(candidate, k=1) if engine.ready else []
+            search_relevance = search_hits[0]["score"] if search_hits else 0.0
+
+            fusion = fuse_causal_and_relevance(search_relevance, causal_rv)
+        except Exception as e:
+            db.deduct_credit(raw_key, -credits_per_search)
+            return JSONResponse(_failed_task(task_id, context_id, f"causal check failed -- credit refunded: {e}"))
+
+        db.log_usage(raw_key, f"causal-check:{candidate}", None, 1)
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        record = db.get_key_record(raw_key)
+        return JSONResponse({
+            "task": {
+                "id": task_id,
+                "contextId": context_id,
+                "status": {"state": "TASK_STATE_COMPLETED", "timestamp": now},
+                "artifacts": [{
+                    "artifactId": str(uuid.uuid4()),
+                    "name": "causal_driver_check",
+                    "description": f"credits_remaining: {record['credits']}",
+                    "parts": [{
+                        "data": {
+                            "candidate": candidate,
+                            "target": target,
+                            "confounders": confounders,
+                            "methodlm_adjust_result": adjust_result,
+                            "causal_robustness_value": causal_rv,
+                            "search_relevance": round(search_relevance, 3),
+                            "spiking_fusion": fusion,
+                            "verdict": "real_driver" if fusion["fired"] else "not_established",
+                        },
+                        "mediaType": "application/json",
+                    }],
+                }],
             }
         })
 

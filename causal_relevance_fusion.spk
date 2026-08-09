@@ -1,0 +1,22 @@
+# Causal + relevance fusion neuron for the A2A "causal-driver-check" skill.
+#
+# One LIF neuron, same real proven pattern as evidence_integrator.spk
+# (Concept Shakedown) and llama-demo's fusion_verdict.spk -- combines two
+# genuinely different kinds of evidence instead of picking one:
+#   search_relevance -- OBSERVE's own semantic search score for how well
+#                        the candidate driver's name/description matches
+#                        real indexed context (drive = score * 100; a
+#                        real observed relevant-hit score of ~0.55 -> 55)
+#   causal_rv         -- MethodLM's real Cinelli-Hazlett robustness value
+#                        for this candidate as an adjusted driver of the
+#                        target (drive = RV * 150; RV=0.67+, a genuinely
+#                        strong driver, clears threshold alone)
+#
+# threshold=100 means: a very strong causal RV alone can fire without any
+# search corroboration, but a moderate RV (e.g. 0.3 -> drive 45) needs
+# real search relevance too (another ~55+) to combine and cross the bar --
+# graded integration, not "pick whichever number is bigger."
+
+neuron causal_fusion threshold=100 leak=12 type=LIF
+
+refractory=0ms

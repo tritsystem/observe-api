@@ -1,0 +1,17 @@
+# Self-adjustment layer's confidence gate. Same minimal single-neuron
+# pattern as retrieval_confidence.spk: a real LIF neuron decides whether a
+# learned adjustment weight is actually strong enough to inject into an
+# LLM's context, instead of always injecting whatever the current number
+# happens to be. drive = weight * 150 (see self_adjustment_layer.py) puts
+# a weight comfortably above baseline (0.3) over threshold=100 and a
+# weight still near baseline comfortably under it.
+#
+# Deliberately NOT where the water-like weight dynamics (bidirectional
+# update, decay-to-baseline, diffusion) live -- those are explicit Python
+# in self_adjustment_layer.py. This neuron's only job is the fire/no-fire
+# gate decision, the one part of this design Spikeling's LIF primitive is
+# actually a clean fit for.
+
+neuron gate threshold=100 leak=15
+
+refractory=0ms

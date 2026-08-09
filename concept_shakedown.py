@@ -43,6 +43,7 @@ from pathlib import Path
 import numpy as np
 
 from spiking_evidence import spiking_verdict
+import obsidian_memory
 
 
 def log(msg):
@@ -425,6 +426,12 @@ def main():
                           "consume the embeddings, so building them is real, avoidable cost "
                           "(minutes, not seconds, on a large codebase) unless you actually want "
                           "the codebase searchable afterward too.")
+    ap.add_argument("--log-to-vault", action="store_true",
+                     help="write a real Project Work entry (run summary + verdict counts) to "
+                          "the Obsidian vault via obsidian_memory.py, so a future MethodLM "
+                          "RECALL query can find this run. OFF by default -- a test/dry run "
+                          "shouldn't silently pollute the real vault; opt in for a run you "
+                          "actually want remembered.")
     args = ap.parse_args()
 
     config = load_config(args.config)
@@ -459,6 +466,80 @@ def main():
             print(f"\n=== {ctype} ({len(items)}) ===")
             for r in items:
                 print(f"  {r['name']} ({r['file']}:{r['line']}) -> {r['verdict']}")
+
+    if args.log_to_vault:
+        _log_run_to_vault(repo_path, results)
+
+
+def _log_run_to_vault(repo_path, results):
+    """Real write-back half of the RECALL loop: MethodLM's RECALL tool reads the vault via
+    OBSERVE semantic search, this is the other end -- a real shakedown run's actual outcome
+    persisted so a later RECALL query ("did we already check this concept") finds it. One
+    Project Work entry per run (the vault's own convention -- see obsidian_memory.py); a
+    real classic-vs-spiking disagreement additionally becomes a Lesson, since that's the
+    specific case evaluate_concept()'s own docstring calls out as worth surfacing, not a
+    per-run occurrence not worth a standing lesson."""
+    repo_name = os.path.basename(repo_path.rstrip("/\\")) or repo_path
+
+    counts = {}
+    disagreements = []
+    for r in results:
+        verdict_kind = r["verdict"].split(" ", 1)[0]   # CONFIRMED / NO / UNKNOWN / UNOBSERVABLE
+        counts[verdict_kind] = counts.get(verdict_kind, 0) + 1
+        classic_confirmed = r["verdict"].startswith("CONFIRMED")
+        spiking_confirmed = r["spiking_verdict"].startswith("CONFIRMED")
+        classic_checked = not r["verdict"].startswith(("UNOBSERVABLE", "UNKNOWN"))
+        spiking_checked = not r["spiking_verdict"].startswith(("UNOBSERVABLE", "UNKNOWN"))
+        if classic_checked and spiking_checked and classic_confirmed != spiking_confirmed:
+            disagreements.append(r)
+
+    count_line = ", ".join(f"{k}: {v}" for k, v in sorted(counts.items()))
+    lines = [
+        f"Ran concept_shakedown.py against {repo_path}.",
+        f"{len(results)} concepts checked -- {count_line}.",
+    ]
+    if disagreements:
+        lines.append(f"\n{len(disagreements)} classic-vs-spiking verdict disagreement(s):")
+        for r in disagreements:
+            lines.append(f"  - {r['type']} '{r['name']}' ({r['file']}:{r['line']}): "
+                         f"classic={r['verdict']} | spiking={r['spiking_verdict']}")
+    else:
+        lines.append("No classic-vs-spiking verdict disagreements this run.")
+
+    path = obsidian_memory.log_project_work(
+        title=f"Concept Shakedown run: {repo_name}",
+        project_tag="observe-api-shakedown",
+        status="completed",
+        output_text="\n".join(lines),
+        kind="concept_shakedown",
+    )
+    log(f"[shakedown] logged run to vault: {path}")
+
+    if disagreements:
+        lesson_lines = [
+            f"During a Concept Shakedown run against {repo_name}, the classic OR-based "
+            f"verdict and the Spiking (weighted LIF integrator) verdict disagreed on "
+            f"{len(disagreements)} concept(s) -- one method confirmed, the other didn't.",
+            "",
+            "Example(s):",
+        ]
+        for r in disagreements[:5]:
+            lesson_lines.append(f"- {r['type']} '{r['name']}': classic={r['verdict']} | "
+                                f"spiking={r['spiking_verdict']}")
+        lesson_lines.append(
+            "\nRule: when they disagree, check which evidence signal(s) drove each verdict "
+            "(signals/spiking_trace in the JSON output) before trusting either -- a classic "
+            "CONFIRMED on one thin disk_glob hit is weaker than it looks; a spiking "
+            "NO-EVIDENCE can mean several individually-weak signals never combined to clear "
+            "threshold even though at least one was real."
+        )
+        lesson_path, wikilink = obsidian_memory.log_lesson(
+            title=f"Concept Shakedown: classic vs spiking verdict disagreement ({repo_name})",
+            scope_tags=["concept-shakedown", "spiking-evidence", "observe-api"],
+            body_markdown="\n".join(lesson_lines),
+            severity="process",
+        )
+        log(f"[shakedown] logged disagreement lesson to vault: {lesson_path}")
 
 
 if __name__ == "__main__":
