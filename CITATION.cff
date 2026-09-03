@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use the OBSERVE Search API or its client tools, please cite it as below."
+title: "OBSERVE Search API: pay-per-query semantic code search for AI agents"
+abstract: >-
+  A hosted, pay-per-query semantic code-search API built for AI agents to call
+  directly, with a fully automated signup-to-search loop, Stripe-backed prepaid
+  credits, per-key isolation, and an ACP-compatible agentic-commerce discovery
+  and reputation layer. Client core shared across a CLI, an MCP server, and
+  LangChain / CrewAI adapters.
+type: software
+authors:
+  - family-names: Branaa
+    given-names: Gavin
+    email: gbranaa4@gmail.com
+repository-code: "https://github.com/tritsystem/observe-api"
+url: "https://github.com/tritsystem/observe-api"
+license: MIT
+version: 0.1.0
+date-released: 2026-09-03
+keywords:
+  - semantic code search
+  - model context protocol
+  - agentic commerce
+  - api
+  - fastapi
