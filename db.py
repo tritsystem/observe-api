@@ -79,6 +79,36 @@ def init_db():
                 last_used_at REAL
             )
         """)
+        # Pro subscription columns -- added via migration below since
+        # api_keys already has real production rows (same pattern as the
+        # commerce_sellers payment_rail/payment_uri migration further
+        # down: CREATE TABLE IF NOT EXISTS does not retroactively add
+        # columns). stripe_customer_id is what a renewal (invoice.paid)
+        # or cancellation (customer.subscription.deleted) webhook event
+        # carries -- neither includes our own key_hash metadata directly
+        # on every event type, so this is the real join key back to an
+        # api_keys row for those events. pro_period_end is a Unix
+        # timestamp (Stripe's current_period_end, seconds) -- used to
+        # gate the pro rate limit/pricing without needing a live Stripe
+        # call on every request.
+        existing_key_cols = {row["name"] for row in conn.execute("PRAGMA table_info(api_keys)").fetchall()}
+        if "is_pro" not in existing_key_cols:
+            conn.execute("ALTER TABLE api_keys ADD COLUMN is_pro INTEGER NOT NULL DEFAULT 0")
+        if "stripe_customer_id" not in existing_key_cols:
+            conn.execute("ALTER TABLE api_keys ADD COLUMN stripe_customer_id TEXT")
+        if "stripe_subscription_id" not in existing_key_cols:
+            conn.execute("ALTER TABLE api_keys ADD COLUMN stripe_subscription_id TEXT")
+        if "pro_period_end" not in existing_key_cols:
+            conn.execute("ALTER TABLE api_keys ADD COLUMN pro_period_end REAL")
+        # Two real tiers (see billing.py's STARTER_*/COMPLIANCE_* constants),
+        # not just an is_pro boolean -- 'starter' or 'compliance'. is_pro
+        # stays as-is (any active paid subscription, either tier) since
+        # rate_limit gating and the credit grant already key off it; this
+        # column is what decides WHICH tier's price/limits/features apply,
+        # and specifically gates the compliance-only /v1/audit-log export
+        # (see server.py) to compliance subscribers only, not starter ones.
+        if "pro_tier" not in existing_key_cols:
+            conn.execute("ALTER TABLE api_keys ADD COLUMN pro_tier TEXT")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS usage_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -249,6 +279,20 @@ def init_db():
                 created_at REAL NOT NULL
             )
         """)
+        # One row per Stripe invoice actually applied -- Stripe webhooks are
+        # at-least-once delivery, so a redelivered invoice.paid must be a
+        # safe no-op, not a second credit grant. UNIQUE on stripe_invoice_id
+        # makes the second INSERT raise (caught in billing.py), same
+        # pattern credit_purchases already uses for one-time purchases.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pro_invoices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_hash TEXT NOT NULL,
+                stripe_invoice_id TEXT UNIQUE NOT NULL,
+                credits_granted INTEGER NOT NULL,
+                created_at REAL NOT NULL
+            )
+        """)
         # Real migration, not just a CREATE TABLE change -- commerce_sellers
         # already has live production rows (CREATE TABLE IF NOT EXISTS does
         # NOT retroactively add columns to an existing table). Idempotent:
@@ -319,9 +363,79 @@ def add_credits(key_hash: str, credits: int, stripe_session_id: str, amount_cent
         )
 
 
+def activate_pro(key_hash: str, stripe_customer_id: str, stripe_subscription_id: str,
+                  period_end: float, credits_granted: int, stripe_invoice_id: str, tier: str):
+    """First activation (checkout.session.completed, mode=subscription) AND
+    every renewal (invoice.paid) both call this -- same effect either way:
+    mark pro, record the current Stripe IDs + which tier, extend
+    pro_period_end, and grant this period's credit allotment. tier is
+    'starter' or 'compliance' (see billing.py) -- a renewal correctly
+    re-asserts the same tier the subscription was created with, since
+    billing.py's webhook handler reads it from the SAME subscription
+    metadata every time, not from stale state on the api_keys row itself.
+    The pro_invoices INSERT's UNIQUE constraint on stripe_invoice_id makes
+    a redelivered webhook for the SAME invoice raise sqlite3.IntegrityError
+    here instead of silently double-granting credits -- billing.py's
+    webhook handler catches that specific error and treats it as an
+    already-applied no-op, same at-least-once-delivery defense
+    credit_purchases already relies on for one-time purchases."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE api_keys SET is_pro = 1, pro_tier = ?, stripe_customer_id = ?, stripe_subscription_id = ?, "
+            "pro_period_end = ?, credits = credits + ? WHERE key_hash = ?",
+            (tier, stripe_customer_id, stripe_subscription_id, period_end, credits_granted, key_hash),
+        )
+        if cur.rowcount == 0:
+            raise ValueError(f"activate_pro: no api_key row for key_hash {key_hash!r}")
+        conn.execute(
+            "INSERT INTO pro_invoices (key_hash, stripe_invoice_id, credits_granted, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (key_hash, stripe_invoice_id, credits_granted, time.time()),
+        )
+
+
+def deactivate_pro(stripe_customer_id: str):
+    """customer.subscription.deleted -- cancellation or non-payment. Looked
+    up by customer id, not key_hash, since that's what this webhook event
+    actually carries. Leaves any already-granted credits alone (a
+    cancelling customer keeps what they already paid for, same principle
+    as a one-time credit purchase never expiring) -- only turns off the
+    pro rate limit/status and future renewals."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE api_keys SET is_pro = 0, pro_tier = NULL WHERE stripe_customer_id = ?",
+            (stripe_customer_id,),
+        )
+
+
+def find_key_hash_by_customer_id(stripe_customer_id: str) -> str | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT key_hash FROM api_keys WHERE stripe_customer_id = ?", (stripe_customer_id,)
+        ).fetchone()
+        return row["key_hash"] if row else None
+
+
 def log_usage(raw_key: str, query: str, repo_filter: str | None, result_count: int):
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO usage_log (key_hash, query, repo_filter, result_count, created_at) VALUES (?, ?, ?, ?, ?)",
             (_hash_key(raw_key), query, repo_filter, result_count, time.time()),
         )
+
+
+def get_usage_log(key_hash: str, limit: int = 1000):
+    """Backs the compliance-tier /v1/audit-log export (see server.py) --
+    reads this project's own existing usage_log table, scoped to exactly
+    one key_hash. Ordered newest-first, capped at `limit` rows (default
+    1000) so a heavy user's export can't unboundedly load the single
+    SQLite writer -- a real caller wanting the FULL history should page
+    via created_at, not something v1 needs to build ahead of real demand
+    for it."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT query, repo_filter, result_count, created_at FROM usage_log "
+            "WHERE key_hash = ? ORDER BY created_at DESC LIMIT ?",
+            (key_hash, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]

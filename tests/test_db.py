@@ -85,3 +85,74 @@ def test_log_usage_records_query_and_repo(fresh_db):
     assert row["query"] == "retry logic"
     assert row["repo_filter"] == "axios"
     assert row["result_count"] == 3
+
+
+def test_activate_pro_marks_key_and_grants_credits(fresh_db):
+    raw_key = fresh_db.create_api_key("alice@example.com")
+    key_hash = fresh_db.hash_key(raw_key)
+
+    fresh_db.activate_pro(key_hash, "cus_1", "sub_1", 1234567890.0, 300000, "in_1", "starter")
+
+    record = fresh_db.get_key_record(raw_key)
+    assert record["is_pro"] == 1
+    assert record["stripe_customer_id"] == "cus_1"
+    assert record["stripe_subscription_id"] == "sub_1"
+    assert record["pro_period_end"] == 1234567890.0
+    assert record["credits"] == 300000
+
+
+def test_activate_pro_twice_with_same_invoice_id_raises_not_double_grants(fresh_db):
+    """Regression guard for the exact at-least-once webhook redelivery
+    scenario billing.py's handle_webhook is built to survive: the SAME
+    Stripe invoice.paid event arriving twice must not grant credits
+    twice. activate_pro itself raises (via the UNIQUE constraint) on the
+    second call -- billing.py is responsible for catching it, but this
+    test asserts the DB-level guarantee that makes that catch safe: the
+    first call's credits are NOT rolled back or duplicated by the second,
+    failed attempt."""
+    import sqlite3
+
+    raw_key = fresh_db.create_api_key("alice@example.com")
+    key_hash = fresh_db.hash_key(raw_key)
+
+    fresh_db.activate_pro(key_hash, "cus_1", "sub_1", 1000.0, 300000, "in_1", "starter")
+    assert fresh_db.get_key_record(raw_key)["credits"] == 300000
+
+    with pytest.raises(sqlite3.IntegrityError):
+        fresh_db.activate_pro(key_hash, "cus_1", "sub_1", 1000.0, 300000, "in_1", "starter")
+
+    # Still exactly one period's credits -- the failed retry granted nothing.
+    assert fresh_db.get_key_record(raw_key)["credits"] == 300000
+
+
+def test_activate_pro_renewal_with_new_invoice_id_grants_again(fresh_db):
+    raw_key = fresh_db.create_api_key("alice@example.com")
+    key_hash = fresh_db.hash_key(raw_key)
+
+    fresh_db.activate_pro(key_hash, "cus_1", "sub_1", 1000.0, 300000, "in_1", "starter")
+    fresh_db.activate_pro(key_hash, "cus_1", "sub_1", 2000.0, 300000, "in_2", "starter")  # next month's renewal
+
+    record = fresh_db.get_key_record(raw_key)
+    assert record["credits"] == 600000
+    assert record["pro_period_end"] == 2000.0  # extended to the new period
+
+
+def test_deactivate_pro_clears_status_but_keeps_credits(fresh_db):
+    raw_key = fresh_db.create_api_key("alice@example.com")
+    key_hash = fresh_db.hash_key(raw_key)
+    fresh_db.activate_pro(key_hash, "cus_1", "sub_1", 1000.0, 300000, "in_1", "starter")
+
+    fresh_db.deactivate_pro("cus_1")
+
+    record = fresh_db.get_key_record(raw_key)
+    assert record["is_pro"] == 0
+    assert record["credits"] == 300000  # already-paid-for credits are NOT clawed back
+
+
+def test_find_key_hash_by_customer_id(fresh_db):
+    raw_key = fresh_db.create_api_key("alice@example.com")
+    key_hash = fresh_db.hash_key(raw_key)
+    fresh_db.activate_pro(key_hash, "cus_42", "sub_1", 1000.0, 300000, "in_1", "starter")
+
+    assert fresh_db.find_key_hash_by_customer_id("cus_42") == key_hash
+    assert fresh_db.find_key_hash_by_customer_id("cus_unknown") is None

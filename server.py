@@ -205,6 +205,23 @@ def _require_key(authorization: Optional[str]) -> str:
     return raw_key
 
 
+def _rate_limit_ok(raw_key: str) -> bool:
+    """A starter/compliance key (see billing.py's TIERS) gets that tier's
+    own, higher bucket instead of the standard tier's. A second
+    get_key_record call here (on top of _require_key's) is a real,
+    deliberate simplicity tradeoff, not an oversight -- rate_limit.allow()
+    needs to know the tier BEFORE consuming a token, and threading the
+    record through every search handler's call site would be a larger,
+    more error-prone change than one extra cheap SQLite read at v1's real
+    traffic scale (see db.py's get_conn() docstring: one thread-cached
+    connection, not a fresh connect() per call)."""
+    record = db.get_key_record(raw_key)
+    if record and record.get("is_pro") and record.get("pro_tier") in billing.TIERS:
+        spec = billing.TIERS[record["pro_tier"]]
+        return rate_limit.allow(raw_key, spec["rate_capacity"], spec["rate_refill_per_sec"])
+    return rate_limit.allow(raw_key)
+
+
 class SearchRequest(BaseModel):
     query: str
     k: int = 10
@@ -239,7 +256,7 @@ def search(req: SearchRequest, authorization: Optional[str] = Header(None)):
     # bound cost, not request rate, so a key with a large balance could
     # otherwise blast it in a tight loop and starve other concurrent callers
     # on this process (see rate_limit.py).
-    if not rate_limit.allow(raw_key):
+    if not _rate_limit_ok(raw_key):
         raise HTTPException(status_code=429, detail="rate limit exceeded -- slow down and retry shortly")
 
     if req.k < 1 or req.k > 50:
@@ -333,14 +350,18 @@ def private_index(req: PrivateIndexRequest, authorization: Optional[str] = Heade
 
     # Charged on start, not refunded on failure (see CREDITS_PER_PRIVATE_INDEX
     # comment) -- this is a real compute cost regardless of whether the
-    # repo the caller pointed at turns out valid.
-    if not db.deduct_credit(raw_key, CREDITS_PER_PRIVATE_INDEX):
-        raise HTTPException(status_code=402, detail=f"insufficient credits -- indexing costs {CREDITS_PER_PRIVATE_INDEX}")
+    # repo the caller pointed at turns out valid. Compliance keys index
+    # free -- one of the real differentiators from Starter (see billing.py's
+    # TIERS comment), not just a bigger credit number.
+    record = db.get_key_record(raw_key)
+    index_cost = 0 if record and record.get("pro_tier") == "compliance" else CREDITS_PER_PRIVATE_INDEX
+    if index_cost and not db.deduct_credit(raw_key, index_cost):
+        raise HTTPException(status_code=402, detail=f"insufficient credits -- indexing costs {index_cost}")
 
     try:
         tenant_index.manager.start_indexing(key_hash, req.git_url)
     except RuntimeError as e:
-        db.deduct_credit(raw_key, -CREDITS_PER_PRIVATE_INDEX)  # refund -- didn't actually start
+        db.deduct_credit(raw_key, -index_cost)  # refund -- didn't actually start
         raise HTTPException(status_code=409, detail=str(e))
 
     record = db.get_key_record(raw_key)
@@ -363,7 +384,7 @@ def private_search(req: PrivateSearchRequest, authorization: Optional[str] = Hea
     raw_key = _require_key(authorization)
     key_hash = db.hash_key(raw_key)
 
-    if not rate_limit.allow(raw_key):
+    if not _rate_limit_ok(raw_key):
         raise HTTPException(status_code=429, detail="rate limit exceeded -- slow down and retry shortly")
     if req.k < 1 or req.k > 50:
         raise HTTPException(status_code=400, detail="k must be between 1 and 50")
@@ -428,11 +449,74 @@ def signup(req: SignupRequest):
     )
 
 
+class SubscribeRequest(BaseModel):
+    tier: str  # "starter" or "compliance" -- see billing.py's TIERS
+
+
+class SubscribeResponse(BaseModel):
+    checkout_url: str
+    note: str
+
+
+@app.post("/v1/subscribe", response_model=SubscribeResponse)
+def subscribe(req: SubscribeRequest, authorization: Optional[str] = Header(None)):
+    """Upgrades an EXISTING key to a paid tier -- unlike /v1/signup, this
+    doesn't create a new key, since the whole point is turning an
+    already-active account into a recurring subscriber, not issuing a
+    second identity. Nothing changes about the key/credits until Stripe
+    actually confirms payment via the invoice.paid webhook (see
+    billing.py) -- this route only creates the Checkout session."""
+    if req.tier not in billing.TIERS:
+        raise HTTPException(status_code=400, detail=f"tier must be one of {list(billing.TIERS)}")
+    raw_key = _require_key(authorization)
+    record = db.get_key_record(raw_key)
+    checkout_url = billing.create_pro_checkout_session(record["email"], db.hash_key(raw_key), req.tier)
+    spec = billing.TIERS[req.tier]
+    return SubscribeResponse(
+        checkout_url=checkout_url,
+        note=f"Complete checkout_url to activate {spec['name']}: {spec['description']}, "
+             f"${spec['price_cents']/100:.2f}/mo.",
+    )
+
+
 @app.get("/v1/balance")
 def balance(authorization: Optional[str] = Header(None)):
     raw_key = _require_key(authorization)
     record = db.get_key_record(raw_key)
-    return {"credits": record["credits"]}
+    out = {"credits": record["credits"], "is_pro": bool(record.get("is_pro"))}
+    if record.get("is_pro"):
+        out["pro_tier"] = record.get("pro_tier")
+        if record.get("pro_period_end"):
+            out["pro_renews_at"] = record["pro_period_end"]
+    return out
+
+
+class AuditLogEntry(BaseModel):
+    query: str
+    repo_filter: Optional[str] = None
+    result_count: Optional[int] = None
+    created_at: float
+
+
+class AuditLogResponse(BaseModel):
+    entries: list[AuditLogEntry]
+
+
+@app.get("/v1/audit-log", response_model=AuditLogResponse)
+def audit_log(authorization: Optional[str] = Header(None), limit: int = 1000):
+    """Compliance-tier-only real usage-history export -- the actual
+    differentiated feature over Starter (see billing.py's TIERS comment).
+    Reads this project's own existing usage_log table (already populated
+    by every /v1/search and /v1/private/search call, see db.log_usage) --
+    not a new tracking system, just exposing data already being recorded
+    to the customer who generated it, scoped strictly to their own
+    key_hash."""
+    raw_key = _require_key(authorization)
+    record = db.get_key_record(raw_key)
+    if record.get("pro_tier") != "compliance":
+        raise HTTPException(status_code=403, detail="audit-log export is a Compliance-tier feature -- see /v1/subscribe")
+    entries = db.get_usage_log(db.hash_key(raw_key), limit=limit)
+    return AuditLogResponse(entries=[AuditLogEntry(**e) for e in entries])
 
 
 @app.post("/v1/webhook/stripe")

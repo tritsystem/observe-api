@@ -29,13 +29,20 @@ _buckets = {}
 _lock = threading.Lock()
 
 
-def allow(key: str) -> bool:
+def allow(key: str, capacity: float = CAPACITY, refill_per_sec: float = REFILL_PER_SEC) -> bool:
     """True if this call may proceed (consumes one token in that case).
-    False if the caller is over rate and should get a 429."""
+    False if the caller is over rate and should get a 429.
+
+    capacity/refill_per_sec default to the standard tier's constants above;
+    callers pass billing.PRO_RATE_CAPACITY/PRO_RATE_REFILL_PER_SEC for a
+    pro key instead (see server.py's search handlers) -- a bucket is keyed
+    only by API key, so switching a key from standard to pro tier doesn't
+    reset or conflict with its existing bucket state, it just changes the
+    ceiling that key's future calls refill/cap against."""
     now = time.monotonic()
     with _lock:
-        tokens, last = _buckets.get(key, (CAPACITY, now))
-        tokens = min(CAPACITY, tokens + (now - last) * REFILL_PER_SEC)
+        tokens, last = _buckets.get(key, (capacity, now))
+        tokens = min(capacity, tokens + (now - last) * refill_per_sec)
         if tokens < 1.0:
             _buckets[key] = (tokens, now)
             return False

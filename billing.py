@@ -11,6 +11,7 @@ fail until they're set as real environment variables.
 """
 import json
 import os
+import sqlite3
 import urllib.request
 
 import stripe
@@ -36,6 +37,57 @@ WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 # without a redeploy.
 PACKAGE_PRICE_CENTS = int(os.environ.get("OBSERVE_PACKAGE_PRICE_CENTS", "500"))
 PACKAGE_CREDITS = int(os.environ.get("OBSERVE_PACKAGE_CREDITS", "50000"))
+
+# Two real, flat-fee recurring tiers, deliberately NOT priced by the same
+# near-zero-marginal-cost logic as the pay-as-you-go package above. The
+# strategic point isn't credit volume -- it's converting search volume's
+# 1M-searches/day-for-$3k/mo problem (real math: at $0.0001/search, reaching
+# meaningful revenue needs unrealistic anonymous traffic for a new product)
+# into a subscriber-count problem instead.
+#
+# $9 Starter matches what Sourcegraph Cody's Pro tier used to cost -- flagged
+# honestly, not hidden: Cody discontinued that tier in mid-2025 and is now
+# Enterprise-only (~$59/user/mo), so this specific comp is stale by the time
+# this was implemented. $9 stands on its own as a real, low-friction entry
+# price regardless.
+#
+# $49 Compliance is the actual differentiated tier: bundles a real
+# usage-audit export (see server.py's /v1/audit-log, compliance-only --
+# reads this project's own existing usage_log table, not a reimplementation
+# of mcp-gateway's separate hash-chained tamper-evident log, which solves a
+# different problem: protecting an MCP tool-call trail, not exporting one
+# customer's own usage history to them). Free (not just half-price) private
+# indexing and the highest rate limit round out the real value gap between
+# the two tiers, not just a bigger credit number.
+STARTER_PRICE_CENTS = int(os.environ.get("OBSERVE_STARTER_PRICE_CENTS", "900"))
+STARTER_CREDITS_PER_PERIOD = int(os.environ.get("OBSERVE_STARTER_CREDITS_PER_PERIOD", "100000"))
+STARTER_RATE_CAPACITY = float(os.environ.get("OBSERVE_STARTER_RATE_LIMIT_CAPACITY", "20"))
+STARTER_RATE_REFILL_PER_SEC = float(os.environ.get("OBSERVE_STARTER_RATE_LIMIT_PER_SEC", "10"))
+
+COMPLIANCE_PRICE_CENTS = int(os.environ.get("OBSERVE_COMPLIANCE_PRICE_CENTS", "4900"))
+COMPLIANCE_CREDITS_PER_PERIOD = int(os.environ.get("OBSERVE_COMPLIANCE_CREDITS_PER_PERIOD", "600000"))
+COMPLIANCE_RATE_CAPACITY = float(os.environ.get("OBSERVE_COMPLIANCE_RATE_LIMIT_CAPACITY", "100"))
+COMPLIANCE_RATE_REFILL_PER_SEC = float(os.environ.get("OBSERVE_COMPLIANCE_RATE_LIMIT_PER_SEC", "50"))
+
+TIERS = {
+    "starter": {
+        "price_cents": STARTER_PRICE_CENTS,
+        "credits_per_period": STARTER_CREDITS_PER_PERIOD,
+        "rate_capacity": STARTER_RATE_CAPACITY,
+        "rate_refill_per_sec": STARTER_RATE_REFILL_PER_SEC,
+        "name": "OBSERVE API Starter",
+        "description": f"{STARTER_CREDITS_PER_PERIOD:,} credits/mo, 2x rate limit",
+    },
+    "compliance": {
+        "price_cents": COMPLIANCE_PRICE_CENTS,
+        "credits_per_period": COMPLIANCE_CREDITS_PER_PERIOD,
+        "rate_capacity": COMPLIANCE_RATE_CAPACITY,
+        "rate_refill_per_sec": COMPLIANCE_RATE_REFILL_PER_SEC,
+        "name": "OBSERVE API Compliance",
+        "description": f"{COMPLIANCE_CREDITS_PER_PERIOD:,} credits/mo, 10x rate limit, "
+                        f"free private indexing, usage audit-log export",
+    },
+}
 
 SUCCESS_URL = os.environ.get("OBSERVE_CHECKOUT_SUCCESS_URL", "https://example.com/success")
 CANCEL_URL = os.environ.get("OBSERVE_CHECKOUT_CANCEL_URL", "https://example.com/cancel")
@@ -120,6 +172,44 @@ def create_checkout_session(email: str, key_hash: str) -> str:
     return session.url
 
 
+def create_pro_checkout_session(email: str, key_hash: str, tier: str) -> str:
+    """mode=subscription with an inline recurring price_data -- no
+    pre-created Stripe Price object needed in the dashboard, same
+    zero-dashboard-setup convenience the one-time package's price_data
+    already has. subscription_data.metadata (not just the top-level
+    session metadata) is the important part: it's copied onto the actual
+    Subscription object Stripe creates, so every future invoice.paid /
+    customer.subscription.deleted webhook for this subscription carries
+    BOTH key_hash and tier directly -- those events reference the
+    subscription/customer, not this checkout session, so without this
+    they'd have no way back to the right api_keys row or to which tier's
+    price/credits/limits to apply on renewal."""
+    if tier not in TIERS:
+        raise ValueError(f"unknown tier {tier!r} -- must be one of {list(TIERS)}")
+    spec = TIERS[tier]
+    session = stripe.checkout.Session.create(
+        mode="subscription",
+        customer_email=email,
+        line_items=[{
+            "price_data": {
+                "currency": "usd",
+                "product_data": {
+                    "name": spec["name"],
+                    "description": spec["description"],
+                },
+                "unit_amount": spec["price_cents"],
+                "recurring": {"interval": "month"},
+            },
+            "quantity": 1,
+        }],
+        metadata={"key_hash": key_hash, "tier": tier},
+        subscription_data={"metadata": {"key_hash": key_hash, "tier": tier}},
+        success_url=SUCCESS_URL,
+        cancel_url=CANCEL_URL,
+    )
+    return session.url
+
+
 def handle_webhook(payload: bytes, sig_header: str | None):
     if not WEBHOOK_SECRET:
         raise HTTPException(status_code=500, detail="STRIPE_WEBHOOK_SECRET not configured")
@@ -130,8 +220,52 @@ def handle_webhook(payload: bytes, sig_header: str | None):
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
+        if session.get("mode") == "subscription":
+            # The FIRST invoice for a new subscription is paid as part of
+            # Checkout itself -- this event confirms the subscription
+            # exists, but invoice.paid (below) is what actually carries the
+            # invoice id + period_end needed to grant credits idempotently.
+            # Stripe fires both for a new subscription; deliberately doing
+            # the credit grant only in the invoice.paid branch means one
+            # code path handles both first-payment and every renewal,
+            # instead of two separate grant implementations that could drift.
+            return
         key_hash = session["metadata"]["key_hash"]
         credits = int(session["metadata"]["credits"])
         amount_cents = session["amount_total"]
         db.add_credits(key_hash, credits, session["id"], amount_cents)
         _notify_discord_sale(amount_cents, credits)
+
+    elif event["type"] == "invoice.paid":
+        invoice = event["data"]["object"]
+        subscription_id = invoice.get("subscription")
+        if not subscription_id:
+            return  # a one-time-purchase invoice, not a subscription -- nothing to do here
+        sub = stripe.Subscription.retrieve(subscription_id)
+        key_hash = sub["metadata"].get("key_hash")
+        tier = sub["metadata"].get("tier")
+        if not key_hash or tier not in TIERS:
+            print(f"(pro invoice.paid for subscription {subscription_id} has no valid key_hash/tier "
+                  f"metadata -- predates this feature or was created outside create_pro_checkout_session, "
+                  f"skipping)", flush=True)
+            return
+        credits_granted = TIERS[tier]["credits_per_period"]
+        try:
+            db.activate_pro(
+                key_hash=key_hash,
+                stripe_customer_id=invoice["customer"],
+                stripe_subscription_id=subscription_id,
+                period_end=sub["current_period_end"],
+                credits_granted=credits_granted,
+                stripe_invoice_id=invoice["id"],
+                tier=tier,
+            )
+            _notify_discord_sale(invoice["amount_paid"], credits_granted)
+        except sqlite3.IntegrityError:
+            # Redelivered webhook for an invoice already applied -- see
+            # activate_pro's docstring. Correct, expected no-op, not an error.
+            print(f"(invoice {invoice['id']} already applied, ignoring redelivered webhook)", flush=True)
+
+    elif event["type"] == "customer.subscription.deleted":
+        sub = event["data"]["object"]
+        db.deactivate_pro(sub["customer"])
