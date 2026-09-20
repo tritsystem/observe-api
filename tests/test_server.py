@@ -603,3 +603,52 @@ def test_audit_log_returns_real_usage_history_for_compliance_tier(client, fresh_
     entries = resp.json()["entries"]
     assert len(entries) == 1
     assert entries[0]["query"] == "retry logic for a failed upload"
+
+
+# --- Stripe webhook body cap ------------------------------------------------
+# The public route can only verify the signature AFTER it has the whole body, so the body is capped while it streams in
+# (server._read_body_capped / OBSERVE_WEBHOOK_MAX_BYTES). A Content-Length check alone is not enough -- a chunked request
+# carries none -- so both shapes are covered. billing.handle_webhook is stubbed: these tests are about the cap only.
+
+_WEBHOOK_CAP = 1_000
+
+
+@pytest.fixture
+def webhook_cap(client, monkeypatch):
+    monkeypatch.setattr(server, "WEBHOOK_MAX_BYTES", _WEBHOOK_CAP)
+    seen = []
+    monkeypatch.setattr(billing, "handle_webhook", lambda payload, sig: seen.append((payload, sig)))
+    return seen
+
+
+def _chunked(total: int, chunk: int = 100):
+    sent = 0
+    while sent < total:
+        n = min(chunk, total - sent)
+        sent += n
+        yield b"x" * n
+
+
+def test_webhook_small_body_still_reaches_the_handler(client, webhook_cap):
+    resp = client.post("/v1/webhook/stripe", content=b'{"type":"ping"}', headers={"Stripe-Signature": "t=1,v1=abc"})
+    assert resp.status_code == 200 and resp.json() == {"received": True}
+    assert webhook_cap == [(b'{"type":"ping"}', "t=1,v1=abc")]
+
+
+def test_webhook_body_exactly_at_the_cap_is_accepted(client, webhook_cap):
+    resp = client.post("/v1/webhook/stripe", content=b"x" * _WEBHOOK_CAP)
+    assert resp.status_code == 200 and len(webhook_cap[0][0]) == _WEBHOOK_CAP
+
+
+def test_webhook_declared_content_length_over_the_cap_is_413(client, webhook_cap):
+    resp = client.post("/v1/webhook/stripe", content=b"x" * (_WEBHOOK_CAP + 1))
+    assert resp.status_code == 413
+    assert webhook_cap == []
+
+
+def test_webhook_chunked_body_over_the_cap_is_413_without_content_length(client, webhook_cap):
+    """The bypass a header-only check would miss: no Content-Length, body streamed in chunks."""
+    resp = client.post("/v1/webhook/stripe", content=_chunked(_WEBHOOK_CAP * 5))
+    assert "content-length" not in resp.request.headers
+    assert resp.status_code == 413
+    assert webhook_cap == []

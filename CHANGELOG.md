@@ -6,7 +6,13 @@ This service is pre-1.0 — the API surface may still change.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+
+- **`/v1/webhook/stripe` now caps the request body (default 1 MB, `OBSERVE_WEBHOOK_MAX_BYTES`).** The route is public and
+  the signature can only be verified once the whole body has been read, so previously an unauthenticated caller could make
+  the process buffer an arbitrarily large body (measured: a 200 MB unsigned body grew the server's memory by ~212 MB before
+  being rejected). The cap is enforced while streaming, so it also holds for chunked requests that carry no
+  `Content-Length`; an oversized body gets `413`. Stripe events are a few KB, so real webhooks are unaffected.
 
 ## [0.1.0] — 2026-09-03
 

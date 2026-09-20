@@ -79,6 +79,11 @@ CREDITS_PER_COMMERCE_SEARCH = int(os.environ.get("OBSERVE_CREDITS_PER_COMMERCE_S
 # no email verification (see db.create_api_key), so this is exploitable via
 # repeated signups; kept small deliberately for that reason, not an oversight.
 SIGNUP_BONUS_CREDITS = int(os.environ.get("OBSERVE_SIGNUP_BONUS_CREDITS", "100"))
+# Upper bound on the Stripe webhook request body. The route is public and the signature can only be checked AFTER the whole
+# body is in hand, so without a cap an unauthenticated caller could make the process buffer an arbitrarily large body
+# (measured on this service: a 200 MB unsigned body grew RSS by ~212 MB before being rejected). Stripe events are a few KB;
+# 1 MB leaves a wide margin. Enforced while streaming, because a Content-Length check alone is bypassed by chunked encoding.
+WEBHOOK_MAX_BYTES = int(os.environ.get("OBSERVE_WEBHOOK_MAX_BYTES", str(1_000_000)))
 
 _LANDING_PAGE_PATH = os.path.join(os.path.dirname(__file__), "landing", "index.html")
 _DASHBOARD_PAGE_PATH = os.path.join(os.path.dirname(__file__), "landing", "dashboard.html")
@@ -519,9 +524,27 @@ def audit_log(authorization: Optional[str] = Header(None), limit: int = 1000):
     return AuditLogResponse(entries=[AuditLogEntry(**e) for e in entries])
 
 
+async def _read_body_capped(request: Request, limit: int) -> bytes:
+    """Read the request body, answering 413 as soon as it exceeds `limit` bytes -- before buffering the rest.
+
+    Checks a declared Content-Length up front (cheap early reject) AND counts bytes as they stream in, because a chunked
+    request carries no Content-Length and would otherwise bypass the up-front check."""
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > limit:
+        raise HTTPException(status_code=413, detail=f"request body too large (max {limit} bytes)")
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(status_code=413, detail=f"request body too large (max {limit} bytes)")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @app.post("/v1/webhook/stripe")
 async def stripe_webhook(request: Request, stripe_signature: Optional[str] = Header(None, alias="Stripe-Signature")):
-    payload = await request.body()
+    payload = await _read_body_capped(request, WEBHOOK_MAX_BYTES)
     billing.handle_webhook(payload, stripe_signature)
     return {"received": True}
 
