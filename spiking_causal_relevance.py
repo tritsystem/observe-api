@@ -32,8 +32,26 @@ _CORE = os.path.join(SPIKELING_ROOT, "core")
 if _CORE not in sys.path:
     sys.path.insert(0, _CORE)
 
-from compiler.compiler import compile_file  # noqa: E402
-from runtime.runtime import SpikelingRuntime  # noqa: E402
+# Both candidate roots are still this one operator's personal machine (Windows
+# path or its own WSL2 mount of the SAME OneDrive folder) -- neither exists on
+# CI or anyone else's machine, which is exactly what broke `import server` /
+# `import a2a_adapter` everywhere except here. This is a real dependency on a
+# real sibling project (Spikeling), not currently installable as a normal
+# package dependency (not yet on PyPI). Rather than crash the whole API
+# (and every test that imports it) when Spikeling isn't on this machine,
+# defer the failure to call time, where fuse_causal_and_relevance's only
+# caller (a2a_adapter.py's causal-driver-check endpoint) already wraps the
+# call in a try/except that refunds the credit and returns a clean error --
+# this makes that the actual behavior instead of an import-time crash that
+# takes the whole server down with it.
+try:
+    from compiler.compiler import compile_file  # noqa: E402
+    from runtime.runtime import SpikelingRuntime  # noqa: E402
+    _SPIKELING_IMPORT_ERROR = None
+except ImportError as _e:
+    compile_file = None
+    SpikelingRuntime = None
+    _SPIKELING_IMPORT_ERROR = _e
 
 _SPK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "causal_relevance_fusion.spk")
 _ast = None
@@ -44,6 +62,11 @@ CAUSAL_RV_SCALE = 150.0
 
 def _get_ast():
     global _ast
+    if _SPIKELING_IMPORT_ERROR is not None:
+        raise RuntimeError(
+            f"Spikeling not available on this machine ({_SPIKELING_IMPORT_ERROR}); "
+            "causal-driver-check is unavailable here."
+        )
     if _ast is None:
         out_dir = tempfile.mkdtemp(prefix="observe_causal_fusion_")
         _ast = compile_file(_SPK_PATH, output_dir=out_dir)
