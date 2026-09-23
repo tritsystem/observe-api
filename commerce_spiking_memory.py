@@ -58,12 +58,25 @@ def _locate_spikeling_core() -> str:
     )
 
 
-_CORE = _locate_spikeling_core()
-if _CORE not in sys.path:
-    sys.path.insert(0, _CORE)
-
-from compiler.compiler import compile_file  # noqa: E402
-from runtime.runtime import SpikelingRuntime  # noqa: E402
+# Same real fix as spiking_causal_relevance.py, same reason: this eager
+# module-level raise, on a machine without a Spikeling checkout (CI,
+# confirmed live via gh run view -- this is what was still failing
+# `import server` even after that other fix landed), took the whole
+# server down at import time -- every route, not just the commerce ones
+# that actually touch listing-affinity memory. Deferred to first real
+# use (_compile_network, this module's only call site for either import)
+# instead.
+try:
+    _CORE = _locate_spikeling_core()
+    if _CORE not in sys.path:
+        sys.path.insert(0, _CORE)
+    from compiler.compiler import compile_file  # noqa: E402
+    from runtime.runtime import SpikelingRuntime  # noqa: E402
+    _SPIKELING_IMPORT_ERROR = None
+except (ImportError, RuntimeError) as _e:
+    compile_file = None
+    SpikelingRuntime = None
+    _SPIKELING_IMPORT_ERROR = _e
 
 DEFAULT_THRESHOLD = 100.0
 DEFAULT_LEAK = 15.0
@@ -99,6 +112,11 @@ def _generate_spk_text(neuron_names, threshold, leak, seed_weight, learn_rate) -
 
 
 def _compile_network(neuron_names, threshold, leak, seed_weight, learn_rate):
+    if _SPIKELING_IMPORT_ERROR is not None:
+        raise RuntimeError(
+            f"Spikeling not available on this machine ({_SPIKELING_IMPORT_ERROR}); "
+            "listing-affinity memory is unavailable here."
+        )
     spk_text = _generate_spk_text(neuron_names, threshold, leak, seed_weight, learn_rate)
     work_dir = tempfile.mkdtemp(prefix="observe_commerce_memory_")
     spk_path = os.path.join(work_dir, "listing_affinity.spk")
