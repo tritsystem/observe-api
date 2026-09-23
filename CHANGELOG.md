@@ -6,6 +6,13 @@ This service is pre-1.0 — the API surface may still change.
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-09-23
+
+CI was red on every run since the workflow was added (2026-09-03), and the
+`v0.1.0` tag/release predates that workflow entirely — confirmed live via
+`gh run list`/`gh run view`, not assumed from a prior session. This release
+is the first one actually verified against a genuinely green CI run.
+
 ### Security
 
 - **`/v1/webhook/stripe` now caps the request body (default 1 MB, `OBSERVE_WEBHOOK_MAX_BYTES`).** The route is public and
@@ -13,6 +20,20 @@ This service is pre-1.0 — the API surface may still change.
   the process buffer an arbitrarily large body (measured: a 200 MB unsigned body grew the server's memory by ~212 MB before
   being rejected). The cap is enforced while streaming, so it also holds for chunked requests that carry no
   `Content-Length`; an oversized body gets `413`. Stripe events are a few KB, so real webhooks are unaffected.
+
+### Fixed
+
+- **`import server` crashed everywhere the Spikeling engine isn't checked out at a hardcoded personal path** (CI, or any
+  machine other than the one that wrote this code) — `server.py` -> `a2a_adapter.py` -> `spiking_causal_relevance.py`,
+  and separately `server.py` -> `commerce_router.py` -> `commerce_spiking_memory.py`, both imported the Spikeling
+  compiler/runtime eagerly at module load and raised immediately if the sibling checkout wasn't found. This took the
+  whole API down at process start, not just the specific causal-check / listing-affinity features that actually need
+  Spikeling. Both now defer the failure to first real use, raising a clear `RuntimeError` only from the call site that
+  needs it; the causal-check endpoint already had error handling around that call (refunds the credit, returns a clean
+  JSON error), so this makes that the actual behavior instead of an import-time crash. Verified in a fresh Linux
+  virtualenv matching CI (Spikeling genuinely absent): `import server` succeeds and
+  `pytest tests/test_db.py tests/test_env_config.py tests/test_server.py` passes 65/65, up from 2 collection errors.
+  Also verified the normal path (Spikeling present) is unchanged.
 
 ## [0.1.0] — 2026-09-03
 

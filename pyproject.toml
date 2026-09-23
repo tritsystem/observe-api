@@ -1,6 +1,6 @@
 [project]
 name = "observe-search-tools"
-version = "0.1.0"
+version = "0.1.1"
 description = "Client tools for the hosted OBSERVE Search API -- pay-per-query semantic code search and ACP-compatible agentic commerce discovery. CLI + MCP server + LangChain + CrewAI wrappers, sharing one client core so behavior is identical across all of them."
 readme = "README.md"
 requires-python = ">=3.10"
